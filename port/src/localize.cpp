@@ -485,6 +485,10 @@ std::map<int, std::string> Wanted(const LocalizeTable &table, const std::string 
     if (auto found = table.files.find(key); found != table.files.end()) {
         texts = found->second;
     }
+    // The two spare Norune slots are real placeable parts in the port.
+    if(key == "meswin.system" || key == "meswin.system14") {
+        texts[1022]="Mayor's House";texts[1023]="Mayor's Platform";
+    }
     auto patches = table.patches.find(key);
     if (patches == table.patches.end()) {
         return texts;
@@ -550,7 +554,7 @@ bool LocalizeFile(std::string_view path, void *buffer, size_t capacity, int *siz
     }
     const LocalizeTable &table = Table();
     const std::string    key = LocalizeMessageKey(path);
-    const bool           known = table.files.count(key) != 0 || table.patches.count(key) != 0;
+    const bool           known = table.files.count(key) != 0 || table.patches.count(key) != 0 || key=="meswin.system" || key=="meswin.system14";
     Trace(key, known);
     if (!known || size == nullptr || *size < 4) {
         return false;
@@ -592,7 +596,7 @@ const u_int *LocalizePack(const u_int *pack, std::string_view name, const u_int 
     }
     const LocalizeTable &table = Table();
     const std::string    key = LocalizeMessageKey(from->second + "/" + std::string(name));
-    const bool           known = table.files.count(key) != 0 || table.patches.count(key) != 0;
+    const bool           known = table.files.count(key) != 0 || table.patches.count(key) != 0 || key=="meswin.system" || key=="meswin.system14";
     Trace(key, known);
     if (!known || *size < 4) {
         return data;

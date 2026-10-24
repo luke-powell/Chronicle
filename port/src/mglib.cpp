@@ -13,6 +13,8 @@
 #include "dataalloc.hpp"
 #include "dataset.hpp"
 #include "draw3d.hpp"
+#include "town_terrain.hpp"
+#include "editloop.hpp"
 #include "frame.hpp"
 #include "gameloop.hpp"
 #include "mathutil.hpp"
@@ -372,13 +374,25 @@ void Draw3DSceneConstants(gfx::MeshConstants &constants, const RenderInfo &info,
     float world_to_clip[4][4];
     float model_to_clip[4][4];
     Draw3DEyeToClip(info, eye_to_clip);
-    Draw3DMul(world_to_clip, eye_to_clip, info.view_scaled);
     bool projected = info.shadow_pass == 1 || info.shadow_pass == 2;
+    float relativeModel[4][4],relativeView[4][4];
+    const float (*drawModel)[4]=model;
+    const float (*drawView)[4]=info.view_scaled;
+    if(!projected && TownTerrainEnabled(pEditGround)) {
+        sceVu0CopyMatrix(relativeModel,const_cast<float (*)[4]>(model));
+        sceVu0CopyMatrix(relativeView,const_cast<float (*)[4]>(info.view_scaled));
+        for(int axis=0;axis<3;axis++) {
+            relativeModel[3][axis]=float(double(model[3][axis])-double(info.view_position[axis]));
+            relativeView[3][axis]=0;
+        }
+        drawModel=relativeModel;drawView=relativeView;
+    }
+    Draw3DMul(world_to_clip, eye_to_clip, drawView);
     if (transform != nullptr) {
         *transform = gfx::IdentityMeshTransform();
         std::memcpy(transform->projection, eye_to_clip, sizeof(transform->projection));
-        std::memcpy(transform->view, info.view_scaled, sizeof(transform->view));
-        std::memcpy(transform->model, model, sizeof(transform->model));
+        std::memcpy(transform->view, drawView, sizeof(transform->view));
+        std::memcpy(transform->model, drawModel, sizeof(transform->model));
         if (projected) {
             std::memcpy(transform->middle, info.shadow, sizeof(transform->middle));
         }
@@ -388,7 +402,7 @@ void Draw3DSceneConstants(gfx::MeshConstants &constants, const RenderInfo &info,
         Draw3DMul(shadow, info.shadow, model);
         Draw3DMul(model_to_clip, world_to_clip, shadow);
     } else {
-        Draw3DMul(model_to_clip, world_to_clip, model);
+        Draw3DMul(model_to_clip, world_to_clip, drawModel);
     }
     std::memcpy(constants.mvp, model_to_clip, sizeof(model_to_clip));
 

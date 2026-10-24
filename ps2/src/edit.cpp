@@ -2503,6 +2503,9 @@ void EdEditMoveHelpMes() {
     SystemMesW = 0;
     SystemMesH = 0;
     SystemMesX = 230;
+#ifdef PORT
+    SystemMesX=40;SystemMesW=560;SystemMesH=50;
+#endif
 #ifdef PAL
     SystemMesY = 412;
 #else

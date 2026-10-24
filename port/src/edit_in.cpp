@@ -3,6 +3,7 @@
 #include <libvu0.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -499,6 +500,15 @@ PORT_OVERRIDE int EditInInit(float time, char *name) {
 PORT_OVERRIDE int EditInLoop() {
     sceVu0FMATRIX view;
     sceVu0FVECTOR position;
+    if (std::getenv("DC_TEST_MAYOR_INTERIOR")) {
+        static int lastMode = -1;
+        if (GameMode != lastMode) {
+            std::fprintf(stderr, "mayor regression: interior mode %d tick %d\n", GameMode, EdIn_loop_counter);
+            lastMode = GameMode;
+        }
+        if (GameMode == ED_IN_MODE_WALK && EdIn_loop_counter == 2400)
+            std::fprintf(stderr, "mayor regression: walking continues after item cutscene\n");
+    }
 
     if (EdSystemMesCheck() || EdCheckItemOver()) {
         EdSetKeyMode(0);
@@ -1410,7 +1420,10 @@ PORT_OVERRIDE void SetCameraPos(CFrame *frame, CCamera *camera, CCharacter *char
     if (camera_capacity == 0) {
         return;
     }
-    auto          cameras = std::make_unique<INTERIOR_CAMERA[]>(static_cast<std::size_t>(camera_capacity));
+    // active_camera survives this call for the 20-frame transition delay.
+    // Its frame must remain alive through cutscenes and subsequent updates.
+    // EditInInit clears active_camera when another interior is loaded.
+    static std::array<INTERIOR_CAMERA, 8> cameras;
     sceVu0FMATRIX matrix;
     count = 0;
 

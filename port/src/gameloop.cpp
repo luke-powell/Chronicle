@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include "memorycardaccess.hpp"
 #include <cstring>
 #include <format>
 #include <memory>
@@ -983,6 +984,15 @@ int RunGame(int argc, char **argv) {
             LanguageCode = language;
         }
         ApplyJump();
+        if (const char* slot = std::getenv("DC_TEST_LOAD_SLOT")) {
+            CMemoryCardAccess card;
+            card.Initialize();
+            if (card.LoadFromMc(std::atoi(slot)-1) != 1) {
+                std::fprintf(stderr,"test save load failed\n");
+                std::abort();
+            }
+            std::fprintf(stderr,"test save loaded slot %s\n",slot);
+        }
     }
 
     int  title_ran = 0;

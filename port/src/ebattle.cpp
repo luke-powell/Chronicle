@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
+#include "town_terrain.hpp"
+#include "collision.hpp"
 
 #include "character.hpp"
 #include "dataread.hpp"
@@ -356,7 +359,9 @@ int PortEdMoveCheck(float *pos, float *velocity, float *out_pos, MoveCheckInfo *
         rotation[1] = heading;
         chara->SetRotation(rotation);
     }
-    int          result = MoveCheck(pos, velocity, out_pos, out_info, polys, poly_num, mode);
+    int result = MoveCheck(pos, velocity, out_pos, out_info, polys, poly_num, mode);
+    if(std::getenv("DC_WORLD_PRECISION_TRACE") && (velocity[0]!=0 || velocity[2]!=0))
+        std::fprintf(stderr,"precision local move: pos %.9g %.9g requested %.9g %.9g stored_delta %.9g %.9g\n",pos[0],pos[2],velocity[0],velocity[2],out_pos[0]-pos[0],out_pos[2]-pos[2]);
     static float walked = 0.0f;
     if (walking && !EdMoveCharaInfo.interior && out_info->landed) {
         walked += hypotf(out_pos[0] - pos[0], out_pos[2] - pos[2]);

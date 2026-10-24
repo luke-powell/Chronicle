@@ -1,4 +1,7 @@
 #ifdef PORT
+#include "world_origin.hpp"
+#endif
+#ifdef PORT
 #include "world_georama.hpp"
 #include "town_terrain.hpp"
 #endif
@@ -477,6 +480,9 @@ void EditExit() {
     sceVu0FVECTOR fade;
 
     EditSave();
+#ifdef PORT
+    world::Leave();
+#endif
     MGSetBGColor(0.0f, 0.0f, 0.0f, 128.0f);
     StopAllSound();
 
@@ -3384,6 +3390,10 @@ void MainEditMode() {
     static int time_flag = 1;
 
     float time_step = 0.0011133334f;
+#ifdef PORT
+    // Accelerated clock used only by offscreen transition regression fixtures.
+    if(const char* scale=std::getenv("DC_TEST_TIME_SCALE"))time_step*=std::atof(scale);
+#endif
 
     if (((int *) SaveData->GetConfigData())[3] == 0) {
         time_step /= 2.0f;
@@ -3436,11 +3446,27 @@ void MainEditMode() {
     int new_hour = EdGetTime(NowTime);
 
     if (clock_kept != 0 && time_flag != 0 && old_hour != new_hour && hour_set == 0) {
+#ifdef PORT
+        // Lighting, sky, ambient audio and the save clock already interpolate
+        // continuously. Do not hand control to event 0x84 at a period boundary.
+        if(MapNo<4) {
+            // Reuse the normal NPC scheduler without its fade, camera takeover,
+            // player idle reset, or three-second ED_MODE_TIME_CHANGE sequence.
+            for(int block=54;block<64;block++)TexManager.DeleteTextureBlock(block);
+            TexManager.CleanUpBuffer();
+            EdVillagerBuffer.used=0;
+            EdSelectVillager(EdVillagerInfo,NowTime,EditMapInfo);
+            EdInitVilager(EdVillagerInfo,pEditGround,NULL);
+            EdInitVilagerPosition(EdVillager,EdVillagerInfo,pEditGround,NULL);
+        }
+        if(std::getenv("DC_TEST_TIME_SCALE"))std::fprintf(stderr,"seamless time: %d -> %d time %.4f mode %d day %d\n",old_hour,new_hour,NowTime,GameMode,SaveData->GetDay());
+#else
         if (MapNo < 4) {
             change_time_event = 1;
         } else {
             EdStartDrawDay();
         }
+#endif
     }
 
     if (GameMode == ED_MODE_WALK) {
@@ -4058,6 +4084,15 @@ int CheckEditToWalk(float *position) {
     box.min[2] = z - 100.0f;
     box.max[1] = 20000.0f;
     box.min[1] = -20000.0f;
+#ifdef PORT
+    const bool proceduralLanding = WorldGeoramaOutside(pEditGround, pos[0], pos[2]);
+    if (proceduralLanding) {
+        // The cursor can cross mountains while zoomed out. Cast through the
+        // destination's standing space, not through a stale cursor altitude
+        // or the tree canopy hundreds of units above the walkable ground.
+        pos[1] = WorldGeoramaHeight(pos[0], pos[2]) + Chara->body_height;
+    } else
+#endif
     pos[1] += 500.0f;
     int poly_count = pEditGround->PickUpPoly(polys, box, 0);
     int walkable = 1;
@@ -4092,11 +4127,27 @@ int CheckEditToWalk(float *position) {
         sceVu0CopyVector(to, from);
         to[1] -= 1000.0f;
 
-        if (CheckHit(polys, poly_count, from, to, hit, 1, 0) >= 0) {
+        int landingHit;
+#ifdef PORT
+        if(TownTerrainEnabled(pEditGround)) {
+            float origin[4]={std::floor(from[0]/1024)*1024,0,std::floor(from[2]/1024)*1024,0};
+            float localFrom[4],localTo[4];
+            for(int a=0;a<4;a++){localFrom[a]=from[a]-origin[a];localTo[a]=to[a]-origin[a];}
+            for(int p=0;p<poly_count;p++)for(auto& v:polys[p].vertex)for(int a=0;a<3;a++)v[a]-=origin[a];
+            landingHit=CheckHit(polys,poly_count,localFrom,localTo,hit,1,0);
+            for(int p=0;p<poly_count;p++)for(auto& v:polys[p].vertex)for(int a=0;a<3;a++)v[a]+=origin[a];
+            if(landingHit >= 0) for(int a=0;a<3;a++)hit[a]+=origin[a];
+        } else
+#endif
+        landingHit=CheckHit(polys, poly_count, from, to, hit, 1, 0);
+        if (landingHit >= 0) {
             if (EdDebugMoveFlag <= 0) {
                 float alt = pEditGround->GetAlt(from[0], from[1], from[2]);
                 int   area = pEditGround->GetAreaCode(from[0], from[1], from[2]);
                 float drop;
+#ifdef PORT
+                if(std::getenv("DC_TERRAIN_TRACE"))std::fprintf(stderr,"landing check: sample %d hit %.5f alt %.5f polys %d at %.2f %.2f\n",i,hit[1],alt,poly_count,from[0],from[2]);
+#endif
                 drop = hit[1] - alt;
                 drop = drop < 0.0f ? -drop : drop;
 
@@ -4142,6 +4193,13 @@ void MoveEditCursor() {
     float camera_height[3] = {1000.0f, 1400.0f, 2000.0f};
 
     static int camera_dist_mode = 0;
+#ifdef PORT
+    static float editorDistance=1000;
+    int zoom=(EdPadOn(PAD_L2,2)!=0)-(EdPadOn(PAD_R2,2)!=0);
+    editorDistance=fminf(5000000.0f,fmaxf(350.0f,editorDistance*powf(1.025f,float(zoom))));
+    camera_distance[0]=editorDistance;
+    camera_height[0]=editorDistance*.8f+200;
+#endif
 
     float cursor_scale[3] = {1.0f, 1.2f, 1.5f};
 
@@ -4149,6 +4207,9 @@ void MoveEditCursor() {
         cursor_scale[0] *= 0.6f;
     }
 
+#ifdef PORT
+    cursor_scale[0]=camera_distance[0]/1000;
+#endif
     float step_z;
     float camera_angle;
     float step_x;
@@ -4169,8 +4230,12 @@ void MoveEditCursor() {
             area = pEditGround->areas[area_code];
         }
 
-        if (area != NULL) {
-            float unit = area->GetUnitSize();
+        if (area != NULL
+#ifdef PORT
+            || TownTerrainEnabled(pEditGround)
+#endif
+        ) {
+            float unit = area ? area->GetUnitSize() : 100.0f/(10.0f*cursor_scale[0]);
 
             if (EdPadDown(0x1000, 2) != 0) {
                 forward = -unit;
@@ -4243,7 +4308,8 @@ void MoveEditCursor() {
 
     float scale = cursor_scale[camera_dist_mode];
 
-    ECursorFrame->SetScale(scale, scale, scale);
+    float cursor_size=fminf(12.0f,fmaxf(1.0f,sqrtf(scale)));
+    ECursorFrame->SetScale(cursor_size, cursor_size, cursor_size);
 
     if (!(camera_dist_mode < 2)) {
         camera_dist_mode = 0;
@@ -4254,11 +4320,16 @@ void MoveEditCursor() {
 
     sceVu0CopyVector(parts_pos, ECursorFrame->position);
 
+#ifdef PORT
+    if(EdPadDown(PAD_CIRCLE,2)!=0 && EditMenuStatus.mode<2) {
+        EditMenuStatus.mode=EDIT_MENU_MODE_MOVE;NowSelectParts=-1;EditMenuStatus.parts=-1;
+    }
+#endif
     if (PI_SHORT * (float) NowSelectAngle / 2.0f == NowCursorRotY) {
-        if (EdPadDown(2, 2) != 0) {
+        if (EdPadDown(PAD_R1, 2) != 0) {
             OldSelectAngle = NowSelectAngle;
             NowSelectAngle = NowSelectAngle - 1;
-        } else if (EdPadDown(1, 2) != 0) {
+        } else if (EdPadDown(PAD_L1, 2) != 0) {
             OldSelectAngle = NowSelectAngle;
             NowSelectAngle = NowSelectAngle + 1;
         }
@@ -4359,6 +4430,11 @@ void MoveEditCursor() {
         pEditGround->Load(NULL);
     }
 
+#ifdef PORT
+    if (WorldGeoramaOutside(pEditGround, pos[0], pos[2])) {
+        pos[1] = WorldGeoramaHeight(pos[0], pos[2]);
+    } else
+#endif
     if (pEditGround->GetAreaCode(pos[0], pos[1], pos[2]) >= 0) {
         if (pos[1] < pEditGround->GetAlt(pos[0], pos[1], pos[2])) {
             pos[1] = pEditGround->GetAlt(pos[0], pos[1], pos[2]);
@@ -4396,6 +4472,12 @@ void MoveEditCursor() {
         DrawPartsNameCount = 0;
     }
 
+#ifdef PORT
+    if(std::getenv("DC_EDITOR_TRACE")) {
+        static int ticks=0;
+        if(++ticks%30==0)std::fprintf(stderr,"editor: mode %d part %d zoom %.1f cursor %.1f %.1f\n",EditMenuStatus.mode,NowSelectParts,camera_distance[0],world::X(pos[0]),world::Z(pos[2]));
+    }
+#endif
     EditCamera.FollowOn();
     EditCamera.SetFollow(pos[0], pos[1], pos[2]);
 

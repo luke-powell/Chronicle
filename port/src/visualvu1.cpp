@@ -15,6 +15,7 @@
 #include "renderinfo.hpp"
 #include "texture.hpp"
 #include "visual.hpp"
+#include "world_georama.hpp"
 
 namespace {
 
@@ -32,7 +33,7 @@ void Release(Draw3DVisual &visual) {
 }
 
 bool SameMaterial(const Draw3DStrip &a, const Draw3DStrip &b) {
-    return a.texture == b.texture && a.tex0 == b.tex0 && a.tex1 == b.tex1 &&
+    return a.repeat_texture == b.repeat_texture && a.texture == b.texture && a.tex0 == b.tex0 && a.tex1 == b.tex1 &&
            a.texture_name == b.texture_name &&
            std::memcmp(a.diffuse, b.diffuse, sizeof(a.diffuse)) == 0 &&
            std::memcmp(a.ambient, b.ambient, sizeof(a.ambient)) == 0 &&
@@ -459,7 +460,7 @@ void Draw3DFinishVisual(Draw3DVisual &visual) {
     // Norune shares cliff and Mayor-platform faces. Keep their topology until
     // TownTerrainDraw separates those faces after the map has loaded.
     bool norune = false;
-    for (auto& strip : visual.strips) norune |= strip.texture_name.starts_with("e01b");
+    for (auto& strip : visual.strips) norune |= strip.texture_name.starts_with("e01");
     if (!norune) { visual.indices.clear(); visual.indices.shrink_to_fit(); }
 }
 
@@ -477,6 +478,9 @@ void Draw3DStripToList(std::vector<uint32_t> &indices, uint32_t first_vertex, ui
 // The VU1 header's PRMODE: TME only when lit (not on shadow passes, not with unlit), IIP off on
 // shadow passes, FGE when the frame takes fog and it is not a shadow pass, ABE always.
 void Draw3DDrawVisual(const Draw3DVisual &visual, const float model[4][4], const RenderInfo &info, int program) {
+    if(WorldGeoramaDrawingRoad && !visual.indices.empty() && info.shadow_pass==0) {
+        WorldGeoramaDrawRoad(visual,model,info,program);return;
+    }
     if (visual.strips.empty() || (!visual.immediate && visual.mesh == gfx::kNullMesh)) {
         return;
     }
@@ -567,7 +571,7 @@ void Draw3DDrawVisual(const Draw3DVisual &visual, const float model[4][4], const
                 // SetEnv sends CLAMP_1 = 5 every frame; TEX1's MMAG picks the filter.
                 binding.wrap_u = gfx::Wrap::Clamp;
                 binding.wrap_v = gfx::Wrap::Clamp;
-                if (strip.ground_transition || strip.ground_world_uv) {
+                if (strip.ground_transition || strip.ground_world_uv || strip.repeat_texture) {
                     binding.wrap_u = gfx::Wrap::Repeat;
                     binding.wrap_v = gfx::Wrap::Repeat;
                 }

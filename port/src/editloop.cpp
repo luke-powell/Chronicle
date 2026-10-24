@@ -1,3 +1,4 @@
+#include "world_origin.hpp"
 #include "common.h"
 
 #include <libgraph.h>
@@ -17,6 +18,7 @@
 #include "camera.hpp"
 #include "camera_port.hpp"
 #include "camera_zoom.hpp"
+#include "localize.hpp"
 #include "camerafollow.hpp"
 #include "character.hpp"
 #include "clsmes.hpp"
@@ -224,6 +226,7 @@ PORT_OVERRIDE int EdSetMapFlag(int flag_no, int value) {
  * @size 0x1FE8
  */
 PORT_OVERRIDE int EditLoop() {
+    world::BeginTick();
     goto_return_menu = 0;
 
     // Pausing is a walking action: a cutscene/event must not open the pause menu over itself.
@@ -477,6 +480,15 @@ PORT_OVERRIDE int EditLoop() {
 
             break;
         case ED_MODE_WALK:
+            if (std::getenv("DC_TEST_MAYOR_INTERIOR") && MapNo == 0 && loop_counter > 60) {
+                static bool entered = false;
+                if (!entered) {
+                    entered = true;
+                    GotoInterior(const_cast<char*>("i01h06"),22,0,nullptr,-1);
+                    std::fprintf(stderr,"mayor regression: entered interior\n");
+                    break;
+                }
+            }
             if (loop_counter > 0) {
                 TownMouseBegin(&MainCamera, pEditGround, MapNo, GameMode);
                 if (EdCheckViewMode() == 0) {
@@ -536,6 +548,7 @@ PORT_OVERRIDE int EditLoop() {
             GamePad.SetAutoRepeat(PAD_DPAD, 20, 5);
             NowCamera = static_cast<CCamera *>(&EditCamera);
             MainEditMode();
+            if(EditMenuStatus.mode==EDIT_MENU_MODE_CLOSED)EditMenuStatus.mode=EDIT_MENU_MODE_MOVE;
             EditMode();
             NowCamera->Step(1);
             pEditGround->EditAreaClip(NowCamera, -1.0f);
@@ -814,7 +827,9 @@ PORT_OVERRIDE int EditLoop() {
         sceVu0CopyVector(focus_pos, ECursorFrame->position);
     }
 
-    if ((EdDebugMoveFlag > 0 || MapNo < TOWN_COUNT) && EdPadDown(0x100, 2) != 0 && EdCheckViewMode() == 0 && change_time_event == 0) {
+    static bool waitingForTerrain=false;
+    if(GameMode!=ED_MODE_GEORAMA || EdPadDown(PAD_CIRCLE,2)!=0) {waitingForTerrain=false;TownTerrainCancelWalk();}
+    if ((EdDebugMoveFlag > 0 || MapNo < TOWN_COUNT) && (EdPadDown(0x100, 2) != 0 || waitingForTerrain) && EdCheckViewMode() == 0 && change_time_event == 0) {
         sceVu0FVECTOR at;
 
         if (GameMode == ED_MODE_WALK) {
@@ -838,16 +853,21 @@ PORT_OVERRIDE int EditLoop() {
             OldFocusParts = nullptr;
             PartsNameNum = -1;
             DrawPartsNameCount = 30;
-            EditMenuStatus.mode = EDIT_MENU_MODE_CLOSED;
+            EditMenuStatus.mode = EDIT_MENU_MODE_MOVE;
             EditMenuStatus.parts = -1;
             NowSelectParts = -1;
         } else if (GameMode == ED_MODE_GEORAMA && pEditGround->CheckEffect() == 0) {
+            if(!TownTerrainRequestWalk(ECursorFrame->position[0],ECursorFrame->position[2])) {
+                waitingForTerrain=true;
+            } else {
+            waitingForTerrain=false;
             move_count = 30;
             GamePad.AutoRepeatOff();
 
             if (CheckEditToWalk(at) != 0) {
                 GameMode = ED_MODE_WALK;
                 Chara->SetPosition(at);
+                if(std::getenv("DC_TERRAIN_TRACE"))std::fprintf(stderr,"editor: walk resumed %.2f %.2f %.2f\n",at[0],at[1],at[2]);
                 MainCamera.SetAngleSoon(EditCamera.GetAngle());
                 EditCamera.GetPos(at);
                 MainCamera.SetPos(at);
@@ -874,7 +894,8 @@ PORT_OVERRIDE int EditLoop() {
                 }
             }
 
-            EdInitVilagerPosition(EdVillager, EdVillagerInfo, pEditGround, &at);
+            if(GameMode==ED_MODE_WALK)EdInitVilagerPosition(EdVillager, EdVillagerInfo, pEditGround, &at);
+            }
         }
     }
 
@@ -903,7 +924,7 @@ PORT_OVERRIDE int EditLoop() {
     if (GameMode == ED_MODE_GEORAMA) {
         EdStopSoundSrc();
 
-        if ((EdPadDown(0x10, 2) != 0 || EdPadDown(0x20, 2) != 0) && EdInitMenu(ED_MENU_EDIT) != 0) {
+        if ((EdPadDown(0x10, 2) != 0) && EdInitMenu(ED_MENU_EDIT) != 0) {
             NowSelectParts = -1;
             GameMode = ED_MODE_GEORAMA_MENU_INIT;
             SndSePlay(MENU_SOUND_CONFIRM, -1, 0);
@@ -1700,7 +1721,7 @@ PORT_OVERRIDE void MoveCamera(CCameraFollow *camera) {
 
     camera->AddAngle(0.03f * -horizontal);
 
-    if (horizontal == 0.0f) {
+    if (horizontal == 0.0f && camera != &EditCamera) {
         if (GamePad.On(PAD_R1) != 0) {
             camera->AddAngle(-DEG_TO_RAD);
         }
@@ -2276,13 +2297,14 @@ PORT_OVERRIDE int EditInit(void *param) {
 
     if (interior_test == 0) {
         LoadGroundData();
+        WorldGeoramaRegister(SaveData,pEditGround);
         WorldGeoramaUnlock(SaveData,pEditGround);
     }
 
     EdSetDOF(reinterpret_cast<DEPTH_OF_FIELD_INFO *>(&EditMapInfo->dof_start_time));
     camera_dist_mode = 1;
     NowCamera = &MainCamera;
-    EditMenuStatus.mode = EDIT_MENU_MODE_CLOSED;
+    EditMenuStatus.mode = EDIT_MENU_MODE_MOVE;
     EditMenuStatus.parts = -1;
     DebugFont__3.texture_name = "font_buff";
     DebugFont__3.x = 16;
@@ -2329,6 +2351,7 @@ PORT_OVERRIDE int EditInit(void *param) {
         EditPartsObjectOnOff();
     }
 
+    WorldGeoramaLoaded(SaveData,pEditGround);
     pEditGround->RemakeGrid();
     GameMode = ED_MODE_UNK_0;
     EdMoveCharaInit();
@@ -2416,6 +2439,12 @@ PORT_OVERRIDE int EditInit(void *param) {
     EdMesBuffer.Alloc((mes_size >> 4) + 1);
     EditSystemMes.tex_buff = MesWinTexBuff_01;
     EditSystemMes.tex_block = 26;
+    static std::vector<s16> editorMessages;
+    const std::map<int,std::string> editorHelp={
+        {130,"{cross} Pick up   {square} Delete   {triangle} Menu   {L2}/{R2} Zoom"},
+        {120,"{cross} Place   {circle} Cancel   {L1}/{R1} Rotate   {triangle} Menu"}};
+    LocalizeStats editorStats;
+    if(LocalizeMessages(system_mes,mes_size/sizeof(s16),editorHelp,editorMessages,editorStats))system_mes=editorMessages.data();
     EditSystemMes.SetBuff(system_mes);
     static ClsMes name_mes;
     name_mes.fukidashi = false;

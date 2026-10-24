@@ -1,6 +1,10 @@
 #include "mapparts.hpp"
+#include "world_georama.hpp"
+#include "town_terrain.hpp"
+#include "editloop.hpp"
 
 #include <libvu0.h>
+#include <cmath>
 
 // Road tiles must clear the uneven ground at the same height. A small lift lets the ground win the
 // depth test in places as the camera moves, exposing a different, darker surface beneath the road.
@@ -34,6 +38,11 @@ PORT_OVERRIDE void CMapParts::DrawLOD(float *distance, int lowest, int highest, 
     }
 
     sceVu0CopyVector(this->pos, lifted_pos);
+    if(WorldGeoramaCustom(pEditGround,parts_no) && parts_no==23) {
+        WorldGeoramaDrawPlatform(this);
+    }
+    if(TownTerrainEnabled(pEditGround) && area==-1 && subtype==MAP_PARTS_SUBTYPE_ROAD)WorldGeoramaDrawingRoad=this;
     CObjectFrame::DrawLOD(distance, lowest, highest, out_level);
+    WorldGeoramaDrawingRoad=nullptr;
     sceVu0CopyVector(this->pos, saved_pos);
 }

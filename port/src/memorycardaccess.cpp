@@ -1,3 +1,4 @@
+#include "world_origin.hpp"
 #include "memorycardaccess.hpp"
 
 #include <algorithm>
@@ -326,6 +327,7 @@ PORT_OVERRIDE int CMemoryCardAccess::SaveToMc(int file_no) {
     this->card[this->port].dir_exists = 1;
     // The quests' progress goes beside the save; a failure is reported, and the save stands.
     QuestHostSave(SaveSlotDirectory(file_no));
+    world::Save(SaveSlotDirectory(file_no));
     return SaveStateWrite(SaveStatePath(), CurrentState()) ? 1 : -1;
 }
 
@@ -340,6 +342,7 @@ PORT_OVERRIDE int CMemoryCardAccess::LoadFromMc(int file_no) {
     SaveStateRead(SaveStatePath(), state);
     memcpy(SaveData, g_image, sizeof(CSaveData));
     QuestHostLoad(SaveSlotDirectory(file_no));
+    world::Load(SaveSlotDirectory(file_no));
 
     // The save screen keeps starting at the last numbered save.
     if (file_no == kSaveSlotAutosave) {
@@ -391,5 +394,6 @@ bool SaveSlotWriteAutosave() {
         return false;
     }
     QuestHostSave(SaveSlotDirectory(kSaveSlotAutosave));
+    world::Save(SaveSlotDirectory(kSaveSlotAutosave));
     return true;
 }

@@ -1,3 +1,4 @@
+#include "world_origin.hpp"
 #pragma helper_mask_gpr 0x30
 #pragma helper_mask_fpr 0x1000
 
@@ -29,7 +30,7 @@ static int CheckDelete(CEditArea *area, CMapParts *parts, float x, float y, floa
 
 int CEditGround::SetMapParts(int parts_no, float x, float y, float z, int rot_y) {
 #ifdef PORT
-    if (WorldGeoramaOutside(this,x,z)) return WorldGeoramaPlace(this,parts_no,x,z,rot_y);
+    if (WorldGeoramaOutside(this,x,z) || WorldGeoramaCustom(this,parts_no)) return WorldGeoramaPlace(this,parts_no,x,z,rot_y,y);
 #endif
     CVector3_f_     grid;
     int             area_no;
@@ -361,7 +362,7 @@ int CEditGround::SetRoadParts(float x, float y, float z, int column_step, int ro
 
 int CEditGround::DeleteMapParts(int *out_parts_no, int *out_rot_y, float x, float y, float z) {
 #ifdef PORT
-    if (WorldGeoramaOutside(this,x,z)) return WorldGeoramaDelete(this,out_parts_no,out_rot_y,x,z);
+    if (WorldGeoramaOutside(this,x,z) || (TownTerrainEnabled(this) && WorldGeoramaFind(this,x,z)>=0 && parts[WorldGeoramaFind(this,x,z)].area==-1)) return WorldGeoramaDelete(this,out_parts_no,out_rot_y,x,z);
 #endif
     int area_code = GetAreaCode(x, y, z);
 
@@ -497,7 +498,7 @@ CMapParts *CEditGround::GetPartsObject(int parts_no) {
 
 int CEditGround::GetPartsID(float x, float y, float z) {
 #ifdef PORT
-    if (WorldGeoramaOutside(this,x,z)) return WorldGeoramaFind(this,x,z);
+    if (WorldGeoramaOutside(this,x,z) || (TownTerrainEnabled(this) && WorldGeoramaFind(this,x,z)>=0 && parts[WorldGeoramaFind(this,x,z)].area==-1)) return WorldGeoramaFind(this,x,z);
 #endif
     int area_no = GetAreaCode(x, y, z);
 
@@ -568,7 +569,7 @@ void CEditGround::EffectTask() {
 
 int CEditGround::SetFocusParts(float x, float y, float z) {
 #ifdef PORT
-    if (WorldGeoramaOutside(this,x,z)) { focus_parts_id=WorldGeoramaFind(this,x,z); return focus_parts_id; }
+    if (WorldGeoramaOutside(this,x,z) || (TownTerrainEnabled(this) && WorldGeoramaFind(this,x,z)>=0 && parts[WorldGeoramaFind(this,x,z)].area==-1)) { focus_parts_id=WorldGeoramaFind(this,x,z); return focus_parts_id; }
 #endif
     focus_parts_id = -1;
     int area_no = GetAreaCode(x, y, z);
@@ -1114,6 +1115,13 @@ void CEditGround::DrawWaterSurface(CCamera *camera) {
             continue;
         }
 
+#ifdef PORT
+        // Retail's unowned water sheet follows the camera: the original town
+        // floor hid it everywhere except river cuts. Procedural valleys can be
+        // below that sheet, so it must not follow the player into the landscape.
+        if(TownTerrainEnabled(this) && surface->parts_no<0 && (surface->follow[0] || surface->follow[2]) &&
+           (std::abs(world::X(eye[0]))>1400 || std::abs(world::Z(eye[2]))>1400))continue;
+#endif
         CWater *water = &surface->water;
         sceVu0CopyVector(position, surface->offset);
 
@@ -1609,9 +1617,13 @@ void CEditGround::Save(char *path) {
         object->GetPosition(position);
         record->part_id = parts_id;
         record->rot_y = object->rot_y;
-        record->pos_x = position[0];
-        record->pos_y = position[1];
-        record->pos_z = position[2];
+#ifdef PORT
+        if(TownTerrainEnabled(this)) {
+            auto global=world::PositionOf(object->pos);
+            record->pos_x=float(global.x);record->pos_y=float(global.y);record->pos_z=float(global.z);
+        } else
+#endif
+        {record->pos_x = position[0];record->pos_y = position[1];record->pos_z = position[2];}
         record++;
         header->count++;
     }
@@ -1751,9 +1763,13 @@ void CEditGround::Save(int town, CSaveData *save) {
         object->GetPosition(position);
         record->part_id = parts_id;
         record->rot_y = object->rot_y;
-        record->pos_x = position[0];
-        record->pos_y = position[1];
-        record->pos_z = position[2];
+#ifdef PORT
+        if(TownTerrainEnabled(this)) {
+            auto global=world::PositionOf(object->pos);
+            record->pos_x=float(global.x);record->pos_y=float(global.y);record->pos_z=float(global.z);
+        } else
+#endif
+        {record->pos_x = position[0];record->pos_y = position[1];record->pos_z = position[2];}
         record++;
     }
 
@@ -1785,11 +1801,23 @@ void CEditGround::Load(int town, CSaveData *save) {
         record->pos_x = saved->pos_x;
         record->pos_y = saved->pos_y;
         record->pos_z = saved->pos_z;
+#ifdef PORT
+        if(TownTerrainEnabled(this)) {
+            record->pos_x=world::LocalX(saved->pos_x);record->pos_z=world::LocalZ(saved->pos_z);
+        }
+#endif
     }
 
     record->part_id = -1;
     record->rot_y = -1;
+#ifdef PORT
+    WorldGeoramaLoading=TownTerrainEnabled(this);
+#endif
     Load(buffer);
+#ifdef PORT
+    WorldGeoramaLoading=false;
+    world::Loaded(this);
+#endif
 }
 
 int CEditGround::PickUpPoly(CCPoly *polygons, float x, float y, float z) {
@@ -1821,6 +1849,9 @@ int CEditGround::PickUpPoly(CCPoly *out_polygons, CBoxVu0 box, int flags) {
             continue;
         }
 
+#ifdef PORT
+        if(TownTerrainEnabled(this) && object->area==-1 && object->subtype==MAP_PARTS_SUBTYPE_ROAD)continue;
+#endif
         frame = object->GetCollisionFrame();
 
         if (frame == NULL) {
@@ -1854,7 +1885,7 @@ int CEditGround::PickUpPoly(CCPoly *out_polygons, CBoxVu0 box, int flags) {
 
         found = frame->PickUpNearPoly(polygons, box);
 #ifdef PORT
-        if (i == 0 && TownTerrainEnabled(this)) found = TownTerrainKeepPlatform(polygons, found);
+        if (i == 0 && TownTerrainEnabled(this)) found = 0;
 #endif
         polygons += found;
         count += found;
@@ -1870,6 +1901,7 @@ int CEditGround::PickUpPoly(CCPoly *out_polygons, CBoxVu0 box, int flags) {
 
 #ifdef PORT
     count += TownTerrainPolys(this, out_polygons + count, box);
+    if(TownTerrainEnabled(this))count+=WorldGeoramaPlatformPolys(this,out_polygons+count,box);
 #endif
     return count;
 }
@@ -1898,6 +1930,9 @@ int CEditGround::PickUpCameraPoly(CCPoly *out_polygons, CBoxVu0 &box, int flags)
             continue;
         }
 
+#ifdef PORT
+        if(TownTerrainEnabled(this) && object->area==-1 && object->subtype==MAP_PARTS_SUBTYPE_ROAD)continue;
+#endif
         frame = GetCameraFrame(object);
 
         if (frame == NULL) {
@@ -1930,7 +1965,7 @@ int CEditGround::PickUpCameraPoly(CCPoly *out_polygons, CBoxVu0 &box, int flags)
 
         found = frame->PickUpNearPoly(polygons, box);
 #ifdef PORT
-        if (i == 0 && TownTerrainEnabled(this)) found = TownTerrainKeepPlatform(polygons, found);
+        if (i == 0 && TownTerrainEnabled(this)) found = 0;
 #endif
         polygons += found;
         count += found;
@@ -1946,6 +1981,7 @@ int CEditGround::PickUpCameraPoly(CCPoly *out_polygons, CBoxVu0 &box, int flags)
 
 #ifdef PORT
     count += TownTerrainPolys(this, out_polygons + count, box);
+    if(TownTerrainEnabled(this))count+=WorldGeoramaPlatformPolys(this,out_polygons+count,box);
 #endif
     return count;
 }

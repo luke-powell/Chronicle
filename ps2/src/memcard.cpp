@@ -746,6 +746,11 @@ static int AtoraCompOrEvent(EDITPARTS_INFO *info) {
  * @size 0x88
  */
 static int AtraBoardMaxNum(int ground) {
+#ifdef PORT
+    // The port adds parts in spare slots beyond the retail terminator. Count
+    // exactly the valid records that SearchAtoraInfo enumerates for this board.
+    if(CommonMenuAtoraInfo)return CommonMenuAtoraInfo->GetNextPartsNum(-1);
+#endif
     EDIT_PARTS_ATRA *parts;
     int              count;
 
@@ -2494,6 +2499,12 @@ static int AtoraBoardKey() {
     int movable[8];
     int open_mode = MenuAtoraSel.open_mode;
     int max = AtraBoardMaxNum(MenuAtoraSel.map_no);
+#ifdef PORT
+    if(std::getenv("DC_EDITOR_TRACE")) {
+        static int previous=-1;
+        if(previous!=MenuAtoraSel.board_pos){previous=MenuAtoraSel.board_pos;auto* part=SearchAtoraInfo(previous);std::fprintf(stderr,"editor board: index %d of %d part %d\n",previous,max,part?part->parts_no:-1);}
+    }
+#endif
     int old_cursor = MenuAtoraSel.board.cursor;
     int old_pos = MenuAtoraSel.board_pos;
     int moved = 0;

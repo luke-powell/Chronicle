@@ -48,10 +48,12 @@ inline double NaturalHeight(double x, double z) {
     double fade = std::clamp((std::hypot(x, z) - 1250) / 900, 0.0, 1.0);
     fade = fade * fade * (3 - 2 * fade);
     double hills = fade * (95 * Noise(x / 2400, z / 2400) + 22 * Noise(x / 850, z / 850) + 5 * Noise(x / 280, z / 280));
-    double mx=x/6, mz=z/6;
+    double mx = x / 6, mz = z / 6;
     double basin = std::clamp((std::hypot(mx, mz) - 4500) / 8500, 0.0, 1.0);
     basin = basin * basin * (3 - 2 * basin);
-    if (basin == 0) return hills;
+    if (basin == 0) {
+        return hills;
+    }
     // Warped, correlated ridges form ranges with branching spurs, not isolated noise domes.
     double wx = mx + 6500 * Noise(mx / 27000 + 17, mz / 27000 - 31);
     double wz = mz + 6500 * Noise(mx / 27000 - 48, mz / 27000 + 9);
@@ -62,22 +64,70 @@ inline double NaturalHeight(double x, double z) {
         ridge *= ridge;
         ridges += amplitude * ridge * weight;
         weight = std::clamp(ridge * 1.7, 0.0, 1.0);
-        amplitude *= .47; scale *= .48;
+        amplitude *= .47;
+        scale *= .48;
     }
     return hills + basin * mass * (24000 * ridges + 900 * Noise(wx / 9000, wz / 9000));
 }
 
-struct Foundation { double x,z,halfX,halfZ,height; };
+struct Foundation {
+    double x, z, halfX, halfZ, height;
+};
+
 inline std::vector<Foundation> foundations;
-inline double Height(double x,double z) {
-    double h=NaturalHeight(x,z);
-    for(const auto& p:foundations) {
-        double d=std::hypot(std::max(0.0,std::abs(x-p.x)-p.halfX),std::max(0.0,std::abs(z-p.z)-p.halfZ));
-        if(d>=180)continue;
-        double t=d/180;t=t*t*(3-2*t);
-        h=std::lerp(p.height,h,t);
+
+struct Road {
+    double x, z, endX, endZ, height, endHeight;
+};
+
+inline std::vector<Road> roads;
+
+inline double Height(double x, double z) {
+    double weighted = 0, weights = 0, influence = 0;
+    for (const auto &p : foundations) {
+        double d = std::hypot(std::max(0.0, std::abs(x - p.x) - p.halfX), std::max(0.0, std::abs(z - p.z) - p.halfZ));
+        // A building's footprint is a hard constraint. Nearby placements may
+        // grade the surroundings, but must never lift or erode its foundation.
+        if (d < .00001) {
+            return p.height;
+        }
+        if (d >= 400) {
+            continue;
+        }
+        double t = d / 400;
+        t = t * t * (3 - 2 * t);
+        double w = (1 - t) / (d * d);
+        weighted += w * p.height;
+        weights += w;
+        influence = std::max(influence, 1 - t);
     }
-    return h;
+    double base = weights > 0 ? std::lerp(NaturalHeight(x, z), weighted / weights, influence) : NaturalHeight(x, z);
+    double roadSum = 0, roadWeight = 0, nearest = 1e30;
+    for (const auto &r : roads) {
+        double dx = r.endX - r.x, dz = r.endZ - r.z, length = dx * dx + dz * dz;
+        double t = length ? std::clamp(((x - r.x) * dx + (z - r.z) * dz) / length, 0.0, 1.0) : 0;
+        double d = std::hypot(x - r.x - t * dx, z - r.z - t * dz);
+        if (d >= 200) {
+            continue;
+        }
+        double w = std::pow(1 - d / 200, 2) / (1 + d * d);
+        roadSum += w * std::lerp(r.height, r.endHeight, t);
+        roadWeight += w;
+        nearest = std::min(nearest, d);
+    }
+    if (roadWeight) {
+        double t = std::clamp((nearest - 55) / 145, 0.0, 1.0);
+        t = t * t * (3 - 2 * t);
+        base = std::lerp(roadSum / roadWeight, base, t);
+    }
+    return base;
+}
+
+// Surface of the actual finest terrain triangles, also used by draped roads.
+inline double SurfaceHeight(double x, double z) {
+    double sx = std::floor(x / 32) * 32, sz = std::floor(z / 32) * 32, u = (x - sx) / 32, v = (z - sz) / 32;
+    double b = Height(sx + 32, sz), c = Height(sx, sz + 32);
+    return u + v <= 1 ? Height(sx, sz) * (1 - u - v) + b * u + c * v : b * (1 - v) + c * (1 - u) + Height(sx + 32, sz + 32) * (u + v - 1);
 }
 
 inline double Distance(const Tile &t, double x, double z) {
@@ -85,15 +135,15 @@ inline double Distance(const Tile &t, double x, double z) {
                       std::max({t.top() - z, 0.0, z - t.top() - t.size()}));
 }
 
-inline void SelectNode(std::vector<Tile> &out, Tile t, double x, double z) {
+inline void SelectNode(std::vector<Tile> &out, Tile t, double x, double z, int minimumLevel = 0) {
     double distance = Distance(t, x, z);
     if (distance > Radius) {
         return;
     }
-    if (t.level && distance < t.size() * 2.5) {
+    if (t.level > minimumLevel && distance < t.size() * 2.5) {
         for (int dz = 0; dz < 2; dz++) {
             for (int dx = 0; dx < 2; dx++) {
-                SelectNode(out, {t.x * 2 + dx, t.z * 2 + dz, t.level - 1}, x, z);
+                SelectNode(out, {t.x * 2 + dx, t.z * 2 + dz, t.level - 1}, x, z, minimumLevel);
             }
         }
     } else {
@@ -101,13 +151,13 @@ inline void SelectNode(std::vector<Tile> &out, Tile t, double x, double z) {
     }
 }
 
-inline std::vector<Tile> Select(double x, double z) {
+inline std::vector<Tile> Select(double x, double z, int minimumLevel = 0) {
     std::vector<Tile> out;
     double            size = std::ldexp(BaseSize, MaxLevel);
     int64_t           cx = int64_t(std::floor(x / size)), cz = int64_t(std::floor(z / size));
     for (int dz = -1; dz <= 1; dz++) {
         for (int dx = -1; dx <= 1; dx++) {
-            SelectNode(out, {cx + dx, cz + dz, MaxLevel}, x, z);
+            SelectNode(out, {cx + dx, cz + dz, MaxLevel}, x, z, minimumLevel);
         }
     }
     return out;

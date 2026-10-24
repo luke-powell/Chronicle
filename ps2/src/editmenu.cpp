@@ -29,7 +29,11 @@ float            MenuIconPos[6][2];
 EDIT_MENU_CURSOR EdCur;
 float            AnalyzeFill[3];
 
+#ifdef PORT
+s8 EditMenuIconID[6] = {13, 11, 5, 4, 6, 0};
+#else
 s8 EditMenuIconID[6] = {13, 10, 11, 5, 4, 6};
+#endif
 
 CTexture  *Analyze;
 CTexture  *AnaBar;
@@ -295,6 +299,9 @@ int GetNumHowManyItemsHave(int item) {
  */
 static int GetEditMenuMax() {
     int icon_max = 6;
+#ifdef PORT
+    icon_max=5;
+#endif
 
     if (GetGameFlagForManualMenu() == 0) {
         icon_max--;
@@ -907,7 +914,11 @@ static int EditMenuSelect() {
         EdEffectCt = 0;
     } else if (GamePad.Down(PAD_CROSS) != 0) {
         int next[6] = {EDIT_MENU_ATORA_IN, EDIT_MENU_ATORA_MOVE_IN, EDIT_MENU_ANALYZE_IN, EDIT_MENU_SAVE_IN, EDIT_MENU_OPTION_IN, EDIT_MENU_MANUAL_IN};
+#ifdef PORT
+        EditSwitch = next[EdCur.selection+(EdCur.selection>=1)];
+#else
         EditSwitch = next[EdCur.selection];
+#endif
         ComMenuSePlay(MENU_SOUND_CONFIRM);
         EdEffectCt = 0;
         CommonMenuMes2.mes_made = -1;
@@ -1526,7 +1537,11 @@ static void FromAnalyzeEdit() {
     if (EdEffectCt >= 0x10) {
         EdEffectCt = 0;
         MakeWin2Flag = 1;
+#ifdef PORT
+        EdCur.selection = 1;
+#else
         EdCur.selection = 2;
+#endif
         EdCur.x = EdCur.selection * 16 + 0x30;
         EdCur.y = EdCur.selection * 40 + 0x4C;
         EditSwitch = EDIT_MENU_SELECT;

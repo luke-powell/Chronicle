@@ -25,7 +25,7 @@ def main():
     for name, spawn, frames, script, terrain_ground in fixtures:
         log = run(name, "edit:0", frames, script,
                   {"DC_TERRAIN_TRACE": "1", "DC_TERRAIN_TEST_SPAWN": spawn})
-        assert "preserved Mayor platform, 73 triangles" in log
+        assert "georama: placed plot 23" in log and "georama: placed plot 22" in log
         chunks = [int(n) for n in re.findall(r"chunks (\d+)", log)]
         assert chunks and max(chunks) < 2000
         assert "radius 112640000 levels 0..16" in log

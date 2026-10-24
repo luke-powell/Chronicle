@@ -8,6 +8,11 @@
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include "town_terrain.hpp"
+#include "draw3d.hpp"
+#include "mglib.hpp"
+#include "renderinfo.hpp"
+
 #include <vector>
 
 #include "btmisc.hpp"

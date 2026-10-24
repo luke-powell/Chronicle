@@ -16,7 +16,7 @@ EXE = ROOT / "port/build/windows-x64-release/darkcloud.exe"
 OUT = ROOT / "port/run/mod-tests/integration"
 
 
-def run(name, mode, frames, script, extra_env=None):
+def run(name, mode, frames, script, extra_env=None, extra_args=None):
     OUT.mkdir(parents=True, exist_ok=True)
     input_file = OUT / f"{name}.input"
     input_file.write_text(script, encoding="ascii")
@@ -26,7 +26,7 @@ def run(name, mode, frames, script, extra_env=None):
          "--save", str(OUT / f"{name}-save"), "--offscreen",
          "--jump", mode, "--fast-load", "--frames", str(frames),
          "--input", str(input_file), "--width", "1280", "--height", "720",
-         "--screenshot", str(image)],
+         "--screenshot", str(image), *(extra_args or [])],
         cwd=ROOT / "port/run", capture_output=True, timeout=60,
         env={**os.environ, "DC_TOWN_COMBAT_TRACE": "1", **(extra_env or {})},
     )

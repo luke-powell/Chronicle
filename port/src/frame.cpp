@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 
 #include "boxvu0.hpp"
 #include "dataalloc.hpp"
@@ -411,6 +413,20 @@ void trance_normal(float *p0, float *p1, float *p2, float *plane) {
     float e1[4] = {c[0] - a[0], c[1] - a[1], c[2] - a[2], c[3] - a[3]};
     float n[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     vu0::Cross(n, e0, e1);
+    if (std::getenv("DC_WORLD_PRECISION_TRACE")) {
+        static int reported = 0;
+        double maxError = 0;
+        for(int axis=0;axis<3;axis++) {
+            double expected0=0,expected1=0;
+            for(int k=0;k<3;k++) {
+                expected0+=double(g_pick_matrix[k][axis])*(double(p0[4+k])-p0[k]);
+                expected1+=double(g_pick_matrix[k][axis])*(double(p0[8+k])-p0[k]);
+            }
+            maxError=std::max(maxError,std::max(std::abs(double(e0[axis])-expected0),std::abs(double(e1[axis])-expected1)));
+        }
+        if(maxError > .05 && reported++ < 100)
+            std::fprintf(stderr,"precision collider: translation %.9g %.9g max_edge_error %.9g normal_length2 %.9g\n",g_pick_matrix[3][0],g_pick_matrix[3][2],maxError,double(n[0])*n[0]+double(n[1])*n[1]+double(n[2])*n[2]);
+    }
 
     vu0::Copy(p0, a);
     vu0::Copy(p1, b);
