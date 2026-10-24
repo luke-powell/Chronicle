@@ -2,6 +2,9 @@
 #pragma helper_mask_fpr 0x1000
 
 #include "editground.hpp"
+#ifdef PORT
+#include "town_terrain.hpp"
+#endif
 
 #include <cstdlib>
 #include <cstring>
@@ -1834,6 +1837,9 @@ int CEditGround::PickUpPoly(CCPoly *out_polygons, CBoxVu0 box, int flags) {
         }
 
         found = frame->PickUpNearPoly(polygons, box);
+#ifdef PORT
+        if (i == 0 && TownTerrainEnabled(this)) found = TownTerrainKeepPlatform(polygons, found);
+#endif
         polygons += found;
         count += found;
     }
@@ -1846,6 +1852,9 @@ int CEditGround::PickUpPoly(CCPoly *out_polygons, CBoxVu0 box, int flags) {
         }
     }
 
+#ifdef PORT
+    count += TownTerrainPolys(this, out_polygons + count, box);
+#endif
     return count;
 }
 
@@ -1904,6 +1913,9 @@ int CEditGround::PickUpCameraPoly(CCPoly *out_polygons, CBoxVu0 &box, int flags)
         }
 
         found = frame->PickUpNearPoly(polygons, box);
+#ifdef PORT
+        if (i == 0 && TownTerrainEnabled(this)) found = TownTerrainKeepPlatform(polygons, found);
+#endif
         polygons += found;
         count += found;
     }
@@ -1916,6 +1928,9 @@ int CEditGround::PickUpCameraPoly(CCPoly *out_polygons, CBoxVu0 &box, int flags)
         }
     }
 
+#ifdef PORT
+    count += TownTerrainPolys(this, out_polygons + count, box);
+#endif
     return count;
 }
 

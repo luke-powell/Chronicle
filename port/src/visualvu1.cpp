@@ -456,8 +456,11 @@ void Draw3DFinishVisual(Draw3DVisual &visual) {
         return;
     }
     visual.mesh = gfx::CreateMesh(visual.vertices, visual.indices);
-    visual.indices.clear();
-    visual.indices.shrink_to_fit();
+    // Norune shares cliff and Mayor-platform faces. Keep their topology until
+    // TownTerrainDraw separates those faces after the map has loaded.
+    bool norune = false;
+    for (auto& strip : visual.strips) norune |= strip.texture_name.starts_with("e01b");
+    if (!norune) { visual.indices.clear(); visual.indices.shrink_to_fit(); }
 }
 
 void Draw3DStripToList(std::vector<uint32_t> &indices, uint32_t first_vertex, uint32_t count) {

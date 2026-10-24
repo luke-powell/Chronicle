@@ -39,6 +39,8 @@
 #include "effect.hpp"
 #include "effectgroup.hpp"
 #include "frame.hpp"
+#include "town_terrain.hpp"
+#include "terrain_kernel.hpp"
 #include "framevu1.hpp"
 #include "gamemode.hpp"
 #include "gamepad.hpp"
@@ -238,10 +240,10 @@ PORT_OVERRIDE int EditLoop() {
 
     if (GameMode != ED_MODE_EVENT) {
         if (EdCheckViewMode() != 0) {
-            MGSetRenderInfo(800.0f, 4.0f, 0x20000 - 2);
+            MGSetRenderInfo(800.0f, 4.0f, TownTerrainEnabled(pEditGround) ? float(terrain::Radius * 2) : 0x20000 - 2);
             MGScisioringForce(1);
         } else {
-            MGSetRenderInfo(800.0f, 5.0f, 0x20000 - 2);
+            MGSetRenderInfo(800.0f, 5.0f, TownTerrainEnabled(pEditGround) ? float(terrain::Radius * 2) : 0x20000 - 2);
             MGScisioringForce(0);
         }
     }
@@ -1274,6 +1276,7 @@ void EditMainDraw() {
 
             TexManager.ReloadTexture(Vif1Packet, 1);
             TexAnime.TexAnime(1);
+            TownTerrainDraw(pEditGround);
             pEditGround->DrawBaseGround();
 
             // Georama mode draws the parts at walking's levels of detail, where retail drew them all at
