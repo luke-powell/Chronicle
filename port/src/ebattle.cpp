@@ -11,6 +11,7 @@
 #include "platform/config.hpp"
 #include "platform/input.hpp"
 #include "snd.hpp"
+#include "town_combat.hpp"
 
 struct EB_KEY {
     int frame;
@@ -317,6 +318,7 @@ extern int chara_fishing;
 
 // Suppress the interior's keyboard steering; the collision seam supplies camera-relative WASD.
 PORT_OVERRIDE float EdGetLXf(int mode) {
+    if (TownCombatBusy()) return 0.0f;
     auto move = InputGetKeyboardMovement();
     if (!PortEdCheckKeyMode(mode) || (viewMode && (move.x || move.y))) {
         return 0.0f;
@@ -325,6 +327,7 @@ PORT_OVERRIDE float EdGetLXf(int mode) {
 }
 
 PORT_OVERRIDE float EdGetLYf(int mode) {
+    if (TownCombatBusy()) return 0.0f;
     auto move = InputGetKeyboardMovement();
     if (!PortEdCheckKeyMode(mode) || (viewMode && (move.x || move.y))) {
         return 0.0f;
@@ -333,6 +336,7 @@ PORT_OVERRIDE float EdGetLYf(int mode) {
 }
 
 int PortEdMoveCheck(float *pos, float *velocity, float *out_pos, MoveCheckInfo *out_info, CCPoly *polys, int poly_num, int mode) {
+    if (TownCombatBusy()) velocity[0] = velocity[2] = 0.0f;
     auto move = InputGetKeyboardMovement();
     bool walking = viewMode && (move.x || move.y) && !(chara_mode & 3) &&
                    !EdMoveCharaInfo.key_lock && PortEdCheckKeyMode(1) && chara_fishing <= ED_FISHING_STAND;
@@ -366,4 +370,11 @@ int PortEdMoveCheck(float *pos, float *velocity, float *out_pos, MoveCheckInfo *
         walked = 0.0f;
     }
     return result;
+}
+
+PORT_OVERRIDE int EdPadOn(int keys, int mode) {
+    if (!PortEdCheckKeyMode(mode)) return 0;
+    // R1 is guard during a town attack; it must not also orbit the camera.
+    if (TownCombatBusy()) keys &= ~PAD_R1;
+    return GamePad.On(keys);
 }

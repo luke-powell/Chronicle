@@ -1,5 +1,9 @@
 #include "common.h"
 
+#ifdef PORT
+#include "town_combat.hpp"
+#endif
+
 #include <libvu0.h>
 
 #include <cmath>
@@ -1703,12 +1707,18 @@ void EdMoveChara() {
         chara->SetMotionSpeed(motion_speed);
     }
 
+#ifdef PORT
+    if (!TownCombatBeforeMove(chara)) {
+#endif
     if (PadDown(0x20) != 0 && EdDebugMoveFlag != 0 && key_lock == 0 && chara_fishing < ED_FISHING_CAST_START) {
         CVector3_f_ jump;
         chara->GetVelocity(&jump);
         jump.y = 2.0f;
         chara->SetVelocity(jump);
     }
+#ifdef PORT
+    }
+#endif
 
     sceVu0FVECTOR next;
     time_before = chara->GetNowTime();
@@ -2667,6 +2677,9 @@ void EdMoveChara() {
         chara_fishing = ED_FISHING_INIT;
     }
 
+#ifdef PORT
+    TownCombatStep(chara);
+#endif
     chara->Step();
 
     if (viewMode == 0) {
