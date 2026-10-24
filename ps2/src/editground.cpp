@@ -4,6 +4,7 @@
 #include "editground.hpp"
 #ifdef PORT
 #include "town_terrain.hpp"
+#include "world_georama.hpp"
 #endif
 
 #include <cstdlib>
@@ -27,6 +28,9 @@
 static int CheckDelete(CEditArea *area, CMapParts *parts, float x, float y, float z);
 
 int CEditGround::SetMapParts(int parts_no, float x, float y, float z, int rot_y) {
+#ifdef PORT
+    if (WorldGeoramaOutside(this,x,z)) return WorldGeoramaPlace(this,parts_no,x,z,rot_y);
+#endif
     CVector3_f_     grid;
     int             area_no;
     int             span[2];
@@ -356,6 +360,9 @@ int CEditGround::SetRoadParts(float x, float y, float z, int column_step, int ro
 }
 
 int CEditGround::DeleteMapParts(int *out_parts_no, int *out_rot_y, float x, float y, float z) {
+#ifdef PORT
+    if (WorldGeoramaOutside(this,x,z)) return WorldGeoramaDelete(this,out_parts_no,out_rot_y,x,z);
+#endif
     int area_code = GetAreaCode(x, y, z);
 
     if (area_code < 0) {
@@ -454,6 +461,9 @@ int CEditGround::GetAreaCode(float x, float y, float z) {
 }
 
 float CEditGround::GetAlt(float x, float y, float z) {
+#ifdef PORT
+    if (WorldGeoramaOutside(this,x,z)) return WorldGeoramaHeight(x,z);
+#endif
     int area_no = GetAreaCode(x, y, z);
 
     if (area_no < 0) {
@@ -486,6 +496,9 @@ CMapParts *CEditGround::GetPartsObject(int parts_no) {
 }
 
 int CEditGround::GetPartsID(float x, float y, float z) {
+#ifdef PORT
+    if (WorldGeoramaOutside(this,x,z)) return WorldGeoramaFind(this,x,z);
+#endif
     int area_no = GetAreaCode(x, y, z);
 
     if (area_no < 0) {
@@ -554,6 +567,9 @@ void CEditGround::EffectTask() {
 }
 
 int CEditGround::SetFocusParts(float x, float y, float z) {
+#ifdef PORT
+    if (WorldGeoramaOutside(this,x,z)) { focus_parts_id=WorldGeoramaFind(this,x,z); return focus_parts_id; }
+#endif
     focus_parts_id = -1;
     int area_no = GetAreaCode(x, y, z);
 

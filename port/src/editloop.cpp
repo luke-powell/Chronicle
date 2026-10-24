@@ -40,6 +40,7 @@
 #include "effectgroup.hpp"
 #include "frame.hpp"
 #include "town_terrain.hpp"
+#include "world_georama.hpp"
 #include "terrain_kernel.hpp"
 #include "framevu1.hpp"
 #include "gamemode.hpp"
@@ -2275,6 +2276,7 @@ PORT_OVERRIDE int EditInit(void *param) {
 
     if (interior_test == 0) {
         LoadGroundData();
+        WorldGeoramaUnlock(SaveData,pEditGround);
     }
 
     EdSetDOF(reinterpret_cast<DEPTH_OF_FIELD_INFO *>(&EditMapInfo->dof_start_time));

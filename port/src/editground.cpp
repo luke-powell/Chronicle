@@ -1,4 +1,5 @@
 #include "editground.hpp"
+#include "world_georama.hpp"
 
 #include <cstdint>
 #include <cstdlib>
@@ -106,6 +107,7 @@ CFrame *PreviewFrame(CMapParts *parts, s32 truncated) {
 } // namespace
 
 PORT_OVERRIDE void CEditGround::DrawPartsCursor(int plot, float *position, float *model_pos, int rot_y, float *rotation, int area_no) {
+    if(WorldGeoramaOutside(this,position[0],position[2])) {WorldGeoramaPreview(this,plot,position,model_pos,rot_y,rotation,area_no);return;}
     [[maybe_unused]] static int old_parts = -1;
     CVector3_f_                 cell;
     CVector3_i_                 grid;

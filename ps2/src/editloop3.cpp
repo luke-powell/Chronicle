@@ -1,3 +1,7 @@
+#ifdef PORT
+#include "world_georama.hpp"
+#include "town_terrain.hpp"
+#endif
 #pragma helper_mask_gpr 0x30
 #pragma helper_mask_fpr 0x1000
 #pragma name_counter 338
@@ -2430,6 +2434,9 @@ static float GetMaxHeightCursor(float *position) {
 }
 
 void LimitEditCursorPos(float *position, float *movement) {
+#ifdef PORT
+    if (TownTerrainEnabled(pEditGround)) { position[0]+=movement[0];position[2]+=movement[2];position[1]=WorldGeoramaHeight(position[0],position[2]);return; }
+#endif
     sceVu0FVECTOR previous;
     sceVu0FVECTOR clamped;
     sceVu0FVECTOR displacement;

@@ -44,10 +44,40 @@ inline double Noise(double x, double z) {
     return std::lerp(std::lerp(h(ix, iz), h(ix + 1, iz), u), std::lerp(h(ix, iz + 1), h(ix + 1, iz + 1), u), v);
 }
 
-inline double Height(double x, double z) {
+inline double NaturalHeight(double x, double z) {
     double fade = std::clamp((std::hypot(x, z) - 1250) / 900, 0.0, 1.0);
     fade = fade * fade * (3 - 2 * fade);
-    return fade * (95 * Noise(x / 2400, z / 2400) + 22 * Noise(x / 850, z / 850) + 5 * Noise(x / 280, z / 280));
+    double hills = fade * (95 * Noise(x / 2400, z / 2400) + 22 * Noise(x / 850, z / 850) + 5 * Noise(x / 280, z / 280));
+    double mx=x/6, mz=z/6;
+    double basin = std::clamp((std::hypot(mx, mz) - 4500) / 8500, 0.0, 1.0);
+    basin = basin * basin * (3 - 2 * basin);
+    if (basin == 0) return hills;
+    // Warped, correlated ridges form ranges with branching spurs, not isolated noise domes.
+    double wx = mx + 6500 * Noise(mx / 27000 + 17, mz / 27000 - 31);
+    double wz = mz + 6500 * Noise(mx / 27000 - 48, mz / 27000 + 9);
+    double mass = std::clamp((Noise(wx / 62000 + 4, wz / 62000 + 7) + .45) / .8, 0.0, 1.0);
+    double ridges = 0, weight = 1, amplitude = .64, scale = 24000;
+    for (int octave = 0; octave < 6; ++octave) {
+        double ridge = 1 - std::abs(Noise(wx / scale + 11, wz / scale - 8));
+        ridge *= ridge;
+        ridges += amplitude * ridge * weight;
+        weight = std::clamp(ridge * 1.7, 0.0, 1.0);
+        amplitude *= .47; scale *= .48;
+    }
+    return hills + basin * mass * (24000 * ridges + 900 * Noise(wx / 9000, wz / 9000));
+}
+
+struct Foundation { double x,z,halfX,halfZ,height; };
+inline std::vector<Foundation> foundations;
+inline double Height(double x,double z) {
+    double h=NaturalHeight(x,z);
+    for(const auto& p:foundations) {
+        double d=std::hypot(std::max(0.0,std::abs(x-p.x)-p.halfX),std::max(0.0,std::abs(z-p.z)-p.halfZ));
+        if(d>=180)continue;
+        double t=d/180;t=t*t*(3-2*t);
+        h=std::lerp(p.height,h,t);
+    }
+    return h;
 }
 
 inline double Distance(const Tile &t, double x, double z) {

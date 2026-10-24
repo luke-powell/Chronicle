@@ -1,3 +1,7 @@
+#ifdef PORT
+#include "world_georama.hpp"
+#include "town_terrain.hpp"
+#endif
 #pragma helper_mask_gpr 0x30
 #pragma helper_mask_fpr 0x1000
 #pragma name_counter 414
@@ -4096,7 +4100,11 @@ int CheckEditToWalk(float *position) {
                 drop = hit[1] - alt;
                 drop = drop < 0.0f ? -drop : drop;
 
-                if (drop < 0.10000000149011612f && area >= 0) {
+                if (drop < 0.10000000149011612f && (area >= 0
+#ifdef PORT
+                    || TownTerrainEnabled(pEditGround)
+#endif
+                )) {
                     pos[1] = 1.0f + hit[1];
                 } else {
                     walkable = 0;
@@ -4188,7 +4196,11 @@ void MoveEditCursor() {
     sceVu0CopyVector(pos, ECursorFrame->position);
 
     if (area != NULL) {
-        if (pEditGround->GetAreaCode(pos[0] + step_x, pos[1], pos[2] + step_z) < 0) {
+        if (pEditGround->GetAreaCode(pos[0] + step_x, pos[1], pos[2] + step_z) < 0
+#ifdef PORT
+            && !TownTerrainEnabled(pEditGround)
+#endif
+        ) {
             step_x = 0.0f;
             step_z = 0.0f;
         }

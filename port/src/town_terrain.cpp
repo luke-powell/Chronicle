@@ -1,9 +1,13 @@
 #include "town_terrain.hpp"
+#include "world_georama.hpp"
 
 #include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include "platform/paths.hpp"
+#include "gfx/tim2.hpp"
 
 #include "camerafollow.hpp"
 #include "character.hpp"
@@ -11,6 +15,8 @@
 #include "draw3d.hpp"
 #include "editground.hpp"
 #include "editloop.hpp"
+#include "gamemode.hpp"
+#include "editmapscript.hpp"
 #include "framevu1.hpp"
 #include "mglib.hpp"
 #include "renderinfo.hpp"
@@ -21,6 +27,7 @@
 namespace {
 struct Chunk {
     gfx::MeshHandle    mesh = 0;
+    gfx::MeshHandle snow = 0;
     std::array<int, 4> edges{};
 };
 
@@ -76,6 +83,8 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
     constexpr int              n = terrain::Resolution;
     std::vector<gfx::Vertex3D> vertices;
     std::vector<uint32_t>      indices;
+    std::vector<gfx::Vertex3D> snowVertices;
+    bool hasSnow=false;
     double                     step = t.size() / n;
     for (int z = 0; z <= n; z++) {
         for (int x = 0; x <= n; x++) {
@@ -103,9 +112,18 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
             v.normal[0] = float(nx / length);
             v.normal[1] = float(16 / length);
             v.normal[2] = float(nz / length);
-            v.uv[0] = float(x * step / 100);
-            v.uv[1] = float(z * step / 100);
-            std::fill(std::begin(v.color), std::end(v.color), 255);
+            v.uv[0] = float((std::fmod(t.left(),200)+x * step) / 200);
+            v.uv[1] = float((std::fmod(t.top(),200)+z * step) / 200);
+            double slope=1-16/length;
+            double rock=std::clamp(std::max((h-900)/2200,(slope-.18)*3),0.0,1.0);
+            double snow=std::clamp((h-8500+900*terrain::Noise(wx/900,wz/900))/2600,0.0,1.0);
+            snow*=std::clamp((.8-slope)*2.5,0.0,1.0);
+            v.color[0]=v.color[1]=v.color[2]=128;
+            v.color[3]=uint8_t(128*rock);
+            auto snowVertex=v;
+            snowVertex.color[3]=uint8_t(128*snow);
+            hasSnow|=snow>.001;
+            snowVertices.push_back(snowVertex);
             vertices.push_back(v);
         }
     }
@@ -115,7 +133,7 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
             indices.insert(indices.end(), {a, c, b, b, c, d});
         }
     }
-    return {gfx::CreateMesh(vertices, indices), edges};
+    return {gfx::CreateMesh(vertices, indices), hasSnow?gfx::CreateMesh(snowVertices,indices):gfx::kNullMesh, edges};
 }
 
 void Update(double x, double z) {
@@ -134,6 +152,7 @@ void Update(double x, double z) {
     for (auto it = chunks.begin(); it != chunks.end();) {
         if (!selection.contains(it->first)) {
             gfx::DestroyMesh(it->second.mesh);
+            gfx::DestroyMesh(it->second.snow);
             it = chunks.erase(it);
         } else {
             ++it;
@@ -149,6 +168,7 @@ void Update(double x, double z) {
         }
         if (it != chunks.end()) {
             gfx::DestroyMesh(it->second.mesh);
+            gfx::DestroyMesh(it->second.snow);
         }
         chunks[t] = Build(t, edges);
         ++built;
@@ -164,12 +184,17 @@ bool TownTerrainEnabled(const CEditGround *ground) { return ground && ground->ma
 void TownTerrainDraw(CEditGround *ground) {
     if (!TownTerrainEnabled(ground)) {
         for (auto &[key, chunk] : chunks) {
-            gfx::DestroyMesh(chunk.mesh);
+            gfx::DestroyMesh(chunk.mesh);gfx::DestroyMesh(chunk.snow);
         }
         chunks.clear();
         lastX = lastZ = 1e30;
         return;
     }
+    if(WorldGeoramaFoundations(ground)) {
+        for(auto& [key,chunk]:chunks){gfx::DestroyMesh(chunk.mesh);gfx::DestroyMesh(chunk.snow);}
+        chunks.clear();lastX=lastZ=1e30;
+    }
+    WorldGeoramaTest(ground);
     // Prepare is idempotent; map loaders may reuse the same arena address.
     Prepare(ground);
     static int testTicks = 0;
@@ -192,12 +217,47 @@ void TownTerrainDraw(CEditGround *ground) {
     if (Chara) {
         Chara->GetPosition(pos);
     }
+    if(GameMode==ED_MODE_GEORAMA && ECursorFrame) {
+        pos[0]=ECursorFrame->position[0];pos[2]=ECursorFrame->position[2];
+    }
     Update(pos[0], pos[2]);
     if (std::getenv("DC_TERRAIN_TRACE") && testTicks % 120 == 0) {
         std::fprintf(stderr, "terrain: player %.2f %.2f %.2f ground %.2f far %.0f\n", pos[0], pos[1], pos[2], terrain::Height(pos[0], pos[2]), mgRenderInfo.far[2]);
     }
     auto *texture = TexManager.GetTexture(const_cast<char *>("e01b01"), -1);
     auto  binding = PortTextureFromCTexture(texture).binding;
+    auto rockBinding=PortTextureFromCTexture(TexManager.GetTexture(const_cast<char*>("e01b06"),-1)).binding;
+    static gfx::tim2::Uploaded ice;
+    if(!ice.texture || !gfx::GetTextureInfo(ice.texture)) {
+        std::ifstream file(PathsDataRoot()/"dun/item/main_data/icebig.img",std::ios::binary);
+        if(file) {
+            std::vector<uint8_t> data((std::istreambuf_iterator<char>(file)),{});
+            const uint8_t signature[]={'T','I','M','2'};
+            auto begin=std::search(data.begin(),data.end(),std::begin(signature),std::end(signature));
+            if(begin!=data.end()) {
+                size_t offset=size_t(begin-data.begin());
+                // Retail stores the RGBA VRAM reservation as total_size for this indexed
+                // image. The serialized picture is only header + indices + palette.
+                if(offset+32<=data.size()) {
+                    uint32_t reserved=0;std::memcpy(&reserved,data.data()+offset+16,4);
+                    if(reserved<1024*1024 && offset+16+reserved>data.size())data.resize(offset+16+reserved);
+                }
+                auto pictures=gfx::tim2::Parse(std::span<const uint8_t>(data.data()+offset,data.size()-offset));
+                if(pictures && !pictures->empty()) {
+                    auto& p=(*pictures)[0];gfx::tim2::Source source;
+                    source.psm=p.psm;source.width=p.width;source.height=p.height;source.levels=p.levels;
+                    source.clut=p.clut;source.clut16=p.clut16;source.csm1=p.clut_csm1;
+                    source.swizzled=data.size()>3 && std::memcmp(data.data(),"IM2",3)==0;
+                    if(auto decoded=gfx::tim2::Decode(source))ice=gfx::tim2::Upload(*decoded);
+                }
+            }
+            if(ice.texture)std::fprintf(stderr,"terrain: original Dark Cloud icebig texture loaded for snow caps\n");
+        }
+    }
+    gfx::TextureBinding snowBinding;
+    snowBinding.texture=ice.texture;snowBinding.palette=ice.palette;
+    rockBinding.filter=snowBinding.filter=gfx::Filter::Linear;
+    rockBinding.wrap_u=rockBinding.wrap_v=snowBinding.wrap_u=snowBinding.wrap_v=gfx::Wrap::Repeat;
     binding.filter = gfx::Filter::Linear;
     binding.wrap_u = binding.wrap_v = gfx::Wrap::Repeat;
     RenderInfo info = mgRenderInfo;
@@ -214,10 +274,22 @@ void TownTerrainDraw(CEditGround *ground) {
         gfx::MeshConstants constants{};
         gfx::MeshTransform transform;
         Draw3DSceneConstants(constants, info, model, &transform);
-        constants.flags = gfx::kMeshLit;
+        constants.flags = gfx::kMeshLit | gfx::kMeshAtmosphere;
+        constants.clip_plane[0][0]=info.view_position[0]-float(tile.left());
+        constants.clip_plane[0][1]=info.view_position[1];
+        constants.clip_plane[0][2]=info.view_position[2]-float(tile.top());
+        constants.clip_plane[0][3]=0.1f; // one game unit is ten centimetres in this landscape.
+        for(int axis=0;axis<3;axis++)constants.clip_plane[1][axis]=-constants.light_direction[0][axis];
+        constants.clip_plane[1][3]=2e-6f; // clear-air aerosol scattering, per metre.
         float white[4] = {1, 1, 1, 1}, black[4] = {0, 0, 0, 0};
         Draw3DMaterial(constants, info, white, white, black);
         gfx::DrawMesh(chunk.mesh, 0, terrain::Resolution * terrain::Resolution * 6, constants, binding, state, &transform);
+        constants.flags |= gfx::kMeshVertexColor | gfx::kMeshWorldUv;
+        constants.world_uv[0][0]=1.f/240;constants.world_uv[0][3]=float(std::fmod(tile.left(),240)/240);
+        constants.world_uv[1][2]=1.f/240;constants.world_uv[1][3]=float(std::fmod(tile.top(),240)/240);
+        auto overlay=state;overlay.blend=true;overlay.alpha={};overlay.depth_write=false;overlay.depth_test=gfx::DepthTest::GEqual;
+        gfx::DrawMesh(chunk.mesh,0,terrain::Resolution*terrain::Resolution*6,constants,rockBinding,overlay,&transform);
+        if(chunk.snow)gfx::DrawMesh(chunk.snow,0,terrain::Resolution*terrain::Resolution*6,constants,snowBinding,overlay,&transform);
     }
 }
 
@@ -278,3 +350,4 @@ int TownTerrainPolys(CEditGround *ground, CCPoly *out, const CBoxVu0 &box) {
     }
     return count;
 }
+
