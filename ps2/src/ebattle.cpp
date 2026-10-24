@@ -2016,9 +2016,14 @@ void EdMoveChara() {
         if (floor_poly >= 0) {
             sceVu0Normalize(floor_normal, walls[floor_poly].normal);
 
-            if (eye_pos[1] - hit[1] < 18.0f) {
+#ifdef PORT
+            const float camera_floor_clearance = 1.6f;
+#else
+            const float camera_floor_clearance = 18.0f;
+#endif
+            if (eye_pos[1] - hit[1] < camera_floor_clearance) {
                 if ((floor_normal[1] < 0.0f ? -floor_normal[1] : floor_normal[1]) > 0.5f) {
-                    eye_pos[1] = 18.0f + hit[1];
+                    eye_pos[1] = camera_floor_clearance + hit[1];
                     camera->SetHeight(eye_pos[1] - look[1] - 0.01f);
                 }
             }
@@ -2138,6 +2143,11 @@ void EdMoveChara() {
             }
 
             lowest = 5.0f;
+#ifdef PORT
+            // Permit the existing orbit below its follow target, so it looks
+            // upward. Physical floor/wall collision above remains in charge.
+            lowest = -camera->GetDistance()*11.4300523f;
+#endif
 
             if (shallow != 0) {
                 lowest = 35.0f;
@@ -2148,7 +2158,11 @@ void EdMoveChara() {
             }
 
             if (camera->GetHeight() > 5.0f) {
+#ifdef PORT
+                drop = camera->GetHeight() - (shallow ? 35.0f : 5.0f);
+#else
                 drop = camera->GetHeight() - lowest;
+#endif
                 drop *= 0.05f;
 
                 if (drop < 0.15f) {

@@ -1,0 +1,102 @@
+Continents, habitats and landforms - 2026-10-24
+
+Why the old world looked like a quilt
+The previous range envelope never fell below 0.2. Outside Norune, almost all
+land received uplift and the same family of mountains. Regional temperatures
+and rain varied over fairly similar scales. Vegetation had a universal density
+floor, even in dry regions. Every drainage node received minimum runoff, so
+small rivers and riparian forest patterns recurred throughout the world.
+The old dryland asset selection also reused palm and stump models.
+
+Research and design principles
+1. Large structure before local noise. Red Blob's Mapgen4 separates elevation,
+   ocean boundaries, wind/rainfall and drainage. Its terrain-from-noise guide
+   explains why unrelated noise fields alone are not enough to describe ecology.
+   Here the continental field, range envelope and plateaus establish regional
+   structure first; weather, dunes, streams and habitat are dependent layers.
+   https://www.redblobgames.com/maps/mapgen4/
+   https://www.redblobgames.com/maps/terrain-from-noise/
+2. Hydrology provides structure. Genevaux et al. (2013) construct terrain from
+   a hierarchical drainage graph and feature patches. Our existing validated
+   downhill routing remains authoritative; the new water balance stops treating
+   every dry depression as a perennial river. This implementation does not copy
+   their graph construction or claim to run a whole-continent erosion simulation.
+   https://cs.purdue.edu/homes/bbenes/papers/Genevaux13ToG.pdf
+3. Deserts have different landforms, not simply yellow grass. USGS distinguishes
+   sand seas, rocky surfaces and closed drainage. NPS describes long windward
+   dune slopes and shorter lee slip faces. Dunes occur in selected depositional
+   regions here, while other desert areas retain rocky tablelands and slopes.
+   https://pubs.usgs.gov/gip/deserts/features/
+   https://www.nps.gov/subjects/geology/aeolian-landforms.htm
+4. Canyons are associated with uplift and incision. Regional tablelands now
+   have resistant caps and local incised corridors, instead of steps imposed on
+   every mountain. Existing channel routing still rejects uphill water and
+   deep cuts through ridges. These are analytic landforms inspired by erosion,
+   not a sediment transport model.
+   https://www.nps.gov/grca/learn/nature/grca-geology.htm
+   https://home.nps.gov/care/learn/nature/geology.htm
+5. A forest is a mosaic. The Forest Service describes canopy gaps ranging from
+   individual trees to large patches. Separate kilometre-scale stands, meadow
+   openings and smaller canopy gaps now modulate the climate suitability. The
+   same rules drive actual tree populations and distant canopy representation.
+   https://research.fs.usda.gov/treesearch/4638
+6. Rare desert water need not come from local rainfall. NPS describes springs
+   and seeps fed by groundwater. Deterministic rare spring sites now create
+   enclosed depressions with water levels below surrounding land, wet margins
+   and palm suitability. They are a stylized spring model, not aquifer simulation.
+   https://www.nps.gov/moja/learn/nature/springs-main.htm?fullweb=1
+
+Implementation
+- Warped continental fields plus an irregular home landmass establish mainland,
+  seas, bays, peninsulas and offshore islands. Global sea level is -300 game
+  units. At 0.1 metre per unit, the 2,000,000-unit atlas spans 200 km.
+- Mountain fold belts can have zero uplift. Regional breaks and tableland masks
+  separate ranges, lowlands and plateaus. Existing valley shoulders, shelves,
+  crags and fine ground relief remain; maximum sampled summit is about 2.45 km.
+- The native town's immediate terrain is unchanged. Its temperate surroundings
+  blend gradually into the broader climate rather than becoming a desert doorstep.
+- Climate varies over broader scales, with continental drying, coastal moisture,
+  upwind barriers and elevation cooling. Smooth ecological weights remain.
+- Sand fields have warped, wind-aligned asymmetric crests and smaller superimposed
+  dunes. Slip faces retain sand; sufficiently steep bedrock cliffs retain rock.
+- Core deserts select cactus/rock geometry only, with low density and no grass
+  clumps. New procedural low-poly cactus and boulder silhouettes use colour
+  sampled from retail foliage and the original e01b06 stone texture. The existing
+  Dark Cloud palm assets are reserved for suitable wet/tropical locations.
+  These are new silhouettes, not falsely identified retail cactus assets.
+- Rainfall minus evaporation/seasonal losses supplies runoff; the universal
+  baseflow was removed. Imported upstream runoff can still feed dry reaches.
+  River mouths join the sea instead of shrinking to a zero-width point.
+- Ocean water exists at every terrain LOD and is clipped at the coast. Near
+  shore it shares the sampled land geometry; beaches blend into the native
+  Queens shore material. Native Queens water texels remain the water surface.
+- Springs are sparse globally owned features. Basin borders are checked before
+  choosing a water level. Their local moisture feeds palm and understory rules.
+- Existing terrain worker, revision rejection, local Georama invalidation,
+  floating origin, world-coordinate saves and complete terrain-owned foliage
+  LOD coverage remain intact. No render-distance cuts were added.
+
+Verification and examples
+Actual-kernel atlas exporter: tools/preview_continent.cpp
+Atlas renderer: tools/render_continent.py
+New ecological/landform tests: tools/test_continents.cpp
+Existing mountain, river, biome, foundation, seam and forest population tests
+now sample continental-scale regions. The town-sized test region is deliberately
+no longer required to contain every biome. Far forest tests explicitly seek
+populated land, so an empty ocean cannot make a tree ownership test pass trivially.
+
+Representative sites (world X,Z):
+- Sand sea with cactus and boulders: -50000,0
+- Oasis centre: -157722.980,23665.164
+- Forested tableland and clearings: -3906,-113281
+- Western shoreline: -207031,121094
+- Mountain belt: -125000,70312
+- Incised tableland: -52000,-20000
+
+Limits
+This remains a deterministic height field, not plate tectonics, dynamic erosion,
+fluid dynamics or cave/overhang geometry. Routing uses bounded upstream history;
+it is not a complete continent-wide discharge solution. The ocean is a rendered
+surface, not a new swimming or sailing system. Cold world generation is still
+substantial. Existing saved foundations retain their heights and world positions,
+so regenerated wilderness can be higher or lower than their old surroundings.

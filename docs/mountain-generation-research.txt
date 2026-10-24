@@ -1,0 +1,116 @@
+Mountain and elevation overhaul — 2026-10-24
+
+Findings
+
+The previous kernel added ridged noise at every mountain scale. It lacked a
+separate valley-floor shape and local upland shelves. More importantly, the
+renderer forced rock coverage to 100% above 3,100 game units, regardless of
+slope. Relatively gentle terrain therefore still looked like bare mountainside.
+The original high-altitude snow override also covered much of the mountain
+before there was space for woodland, subalpine meadow and exposed upper rock.
+
+Primary research
+
+USGS, Geology of Glacier National Park:
+https://www.usgs.gov/geology-and-ecology-of-national-parks/geology-glacier-national-park
+Glacial erosion produces broad-bottomed valleys with steep walls, hanging
+valleys, cirques and sharp ridges. This motivated separating floor and wall
+profiles rather than uniformly increasing or decreasing roughness.
+
+NPS, Yosemite meadows:
+https://www.nps.gov/yose/learn/nature/meadows.htm
+Meadows can occupy relatively flat landforms surrounded by steep terrain;
+water availability and soils matter alongside altitude. This motivated keeping
+soil-covered uplands and integrating the existing continuous climate fields.
+
+NPS, Yosemite geology exhibits:
+https://home.nps.gov/yose/learn/nature/geology-exhibits.htm
+Range-scale uplift, asymmetric slopes, erosion and rockfall create different
+landforms within one mountain landscape; talus accumulates below cliffs.
+
+Genevaux et al., Terrain Modelling from Feature Primitives (2015):
+https://www.cs.purdue.edu/homes/bbenes/papers/Genevaux15CGF.pdf
+Terrain features can be represented and combined explicitly instead of being
+left entirely to generic noise. This implementation uses analytic profiles;
+it does not copy the paper's feature-tree implementation.
+
+Grenier et al., Real-time Terrain Enhancement with Controlled Procedural
+Patterns (2024):
+https://onlinelibrary.wiley.com/doi/full/10.1111/cgf.14992
+Procedural detail should respond to the larger terrain structure. Here, rough
+detail is reduced on shelves and valley floors and retained on shoulders.
+
+Ian Parberry, Designer Worlds (2014):
+https://jcgt.org/published/0003/01/04/paper.pdf
+Combining geographic structure with local detail is valuable for infinite
+terrain. No external elevation datasets or proprietary terrain assets are used.
+
+Implementation
+
+MountainAt separates a broad range envelope, multiscale crests/spurs, warped
+valley corridors, gently rolling elevated floors, local shelves and crag detail.
+Horizontal mountain wavelengths increased by 25% while peak relief remains
+comparable. Town height is unchanged within the protected starting area.
+
+An early repeated-stratum experiment made obvious contour terraces; it was
+discarded. A smoothly varying local shelf elevation now compresses only a
+limited band on selected mountainsides. There is no repeating stair-step
+quantization or abrupt elevation discontinuity.
+
+RockExposure uses slope plus broken upper-alpine terrain, replacing the blanket
+altitude mask. The original ground, rock and icebig textures remain in use.
+Rock and snow use triplanar texture sampling, preventing the horizontal ground
+projection from stretching into vertical stripes on cliff faces.
+Treeline and snowline respond to temperature and now leave a larger vertical
+interval for forest, meadow and exposed rock before summit snow. Nearby trees
+and distant canopy share a slope suitability function so cliffs stay exposed.
+
+The natural-height cache is fixed-size and keyed by exact global double inputs
+and sample spacing. It caches only immutable natural terrain, never town
+foundations or roads. This avoids repeating terrain work across triangle,
+collision and vegetation sampling without caching stale editor changes.
+
+Validation
+
+tools/preview_mountains.cpp exports the actual kernel, including geometric
+slope and surface/ecology suitability. tools/render_mountain_maps.py compares
+matching regions and scales. In the sampled 180,000-unit region, the peak stays
+about 26,100 units. Roughly 37% of sampled uplands remain below 15 degrees,
+while steep terrain is concentrated in walls and escarpments. Soil-capable uplands
+replace the former effectively universal rock coverage.
+
+tools/test_mountains.cpp checks scale, coexistence of gentle terrain/cliffs,
+valleys/shelves, slope-based material rules, starting-town preservation, and
+continuity through trillion-unit coordinates. Existing terrain, foundation,
+river/climate and exact forest population tests are also run. Real-game views
+use isolated saves and the production renderer.
+
+Scope
+
+This is an analytic approximation inspired by geomorphology, not a geological
+time simulation. It does not simulate glaciers, sediment mass balance, talus
+particles or tectonic plates. Steep rock is terrain geometry/material, not new
+scattered boulder models. Drainage is rebuilt on the new landform surface. Each candidate connection
+first tries a terrain-following profile, then a bounded 256-unit A* corridor.
+A state carries water elevation; a successor cannot increase it or pass through
+a lower hollow and subsequently climb back out. Cuts are limited to 128 units.
+Segments are checked against terrain at intervals no larger than 64 units.
+Confluence curves are accepted only if they satisfy the same checks; steep
+reaches narrow according to terrain slope. Riverbank wetness scales with channel
+width, avoiding equally wide green corridors around tiny headwaters.
+
+The new river regression independently samples at 32-unit intervals. Across
+158 active non-lake reaches and 4,000 segments it checks descending water,
+endpoint connections, no airborne centerline water and no deep ridge shortcuts,
+including coordinates around one trillion. This is a bounded catchment model,
+not an unrestricted hydrological solve; broad closed basins remain approximate.
+
+Saved building foundations remain authoritative, while
+unmodified procedural terrain regenerates with the new elevation model.
+
+Performance: cold initial terrain preparation measured about 48 seconds in the
+final pre-material test, down from about 56 seconds before reducing unnecessary
+climate samples on coarse horizon canopy tiles. Full cold relocation tests
+still take substantially longer than steady-state play; this is not a claim of
+instant loading or a fixed frame-rate guarantee. Tree mesh populations and
+canopy coverage remain present at all existing levels.

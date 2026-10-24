@@ -7,19 +7,19 @@
 int main() {
     using namespace terrain;
     assert(Height(0, 0) == 0 && Height(0, 800) == 0);
-    foundations={{3000,3000,100,100,40},{3300,3000,100,100,100}};
+    Foundations()={{3000,3000,100,100,40},{3300,3000,100,100,100}};
     for(int i=2900;i<=3100;i++)assert(Height(i,3000)==40);
     for(int i=3200;i<=3400;i++)assert(Height(i,3000)==100);
     std::vector<double> samples;
     for(int x=2700;x<3700;x++)samples.push_back(Height(x,3000));
-    std::reverse(foundations.begin(),foundations.end());
+    std::reverse(Foundations().begin(),Foundations().end());
     for(int x=2700;x<3700;x++)assert(std::abs(samples[x-2700]-Height(x,3000))<1e-9);
-    roads={{3100,3000,3200,3000,40,100}};
+    Roads()={{3100,3000,3200,3000,40,100}};
     for(int x=3101;x<3200;x++)assert(std::abs(Height(x,3000)-(40+.6*(x-3100)))<1e-8);
     assert(Height(3000,3000)==40 && Height(3300,3000)==100);
     for(int x=3000;x<3400;x+=32)for(int z=2900;z<3100;z+=32)
         assert(std::isfinite(SurfaceHeight(x+.1,z+.2)));
-    foundations.clear();roads.clear();
+    Foundations().clear();Roads().clear();
     std::puts("PASS foundations: hard footprints, order-independent blending, graded road and finite triangle surface");
     for (auto focus : {
              std::pair{0.,        0.        },
@@ -56,11 +56,11 @@ int main() {
                     double h = EdgeHeight(vx, vz, neighbor, alongX);
                     assert(std::isfinite(h));
                     if (i % 2 == 0) {
-                        assert(std::abs(h - Height(vx, vz)) < 1e-8);
+                        assert(std::abs(h - Height(vx, vz,std::ldexp(BaseSize,neighbor)/Resolution)) < 1e-8);
                     } else {
                         double half = w / Resolution;
-                        double a = Height(vx - (alongX ? half : 0), vz - (alongX ? 0 : half));
-                        double b = Height(vx + (alongX ? half : 0), vz + (alongX ? 0 : half));
+                        double a = Height(vx - (alongX ? half : 0), vz - (alongX ? 0 : half),std::ldexp(BaseSize,neighbor)/Resolution);
+                        double b = Height(vx + (alongX ? half : 0), vz + (alongX ? 0 : half),std::ldexp(BaseSize,neighbor)/Resolution);
                         assert(std::abs(h - (a + b) / 2) < 1e-8);
                     }
                 }

@@ -1,0 +1,47 @@
+Terrain performance and player save follow-up, 2026-10-24
+
+Causes and fixes
+- Placing Georama cleared every cached chunk, triggering the blocking initial
+  load path. Compare old/new foundation and road footprints instead; invalidate
+  intersecting chunks including border/normal sampling margins. Removed and
+  moved objects invalidate both their old and new footprints.
+- Chunk CPU generation exceeded the frame budget because the budget was only
+  checked BETWEEN builds. A single persistent worker now builds CPU payloads
+  against immutable snapshots of the edit state. Hydrology caches stay warm on
+  that worker. Vulkan uploads remain on the render thread and are spread across
+  frames. Revision checks reject obsolete placement results.
+- Keep the previous complete selection visible while replacement terrain,
+  canopy, and all tree LOD meshes are prepared. No new foliage range cutoff,
+  reduced population, or camera-dependent eviction was introduced.
+- Atmospheric integration uses 4..16 midpoint samples according to variation
+  across aerosol scale heights instead of always spending 16 samples on every
+  nearby tree vertex. Physical coefficients and the visible horizon are unchanged.
+
+Measured with actual game data at 1280x720
+- Original camera/zoom trace: maximum ordinary terrain update 22.410 ms.
+- Worker trace: maximum ordinary terrain update 1.952 ms.
+- Final far-world camera/zoom trace with staged uploads: p99 terrain update
+  1.302 ms, maximum 2.739 ms. These are terrain update costs, NOT total frame times.
+- Placement regression invalidated 48 of 1828 chunks rather than clearing all.
+- Initial cold load and deliberate far teleports remain blocking and expensive
+  (roughly 47..60 seconds in these tests). This work does not promise zero FPS
+  drops or instantaneous first-time landing.
+
+Save restoration
+- world.json now stores optional town, double x/y/z, and player yaw alongside
+  existing precision placements, tied to save.dat by the existing fingerprint.
+- Old saves remain readable. Invalid player data is ignored; other scenes keep
+  native spawn behavior. Actual town saves capture the player, not the editor cursor.
+- Restoration rebases the scene and camera, clears motion, and survives the
+  retail arrival event overwriting its initial placement. Later terrain edits
+  may raise the player to the ground to prevent an underground spawn.
+- User-requested legacy recovery: latest numbered save 3; Toan house at
+  (56600,-55450), Macho house at (-345700,644800). These are separate sites.
+  Verified safe standing location beside Macho: (-345620,1431.2012939453125,644800).
+  Back up original world.json before adding the recovery player entry.
+
+Regression tools
+- tools/test_terrain_streaming.py: local invalidation, single initial load,
+  retained initial canopy across all levels, and ordinary update p99 budget.
+- tools/test_world_player_save.py: real native autosave, sidecar and exact global
+  position/facing round-trip, including the arrival event.

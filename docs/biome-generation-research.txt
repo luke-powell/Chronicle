@@ -1,0 +1,77 @@
+Biome and river overhaul — 2026-10-24
+
+Research and design
+
+Real vegetation responds to available water and temperature, not a biome ID.
+Rainfall alone is insufficient: evaporation, seasonal drought, soils and
+groundwater affect plant access to water. Mountains produce wetter windward
+slopes and drier leeward areas. Riparian vegetation can therefore persist in
+otherwise dry regions without changing the whole region into tropical forest.
+
+Primary references consulted:
+* NOAA/NWS climate of Hawaii: orographic rain and prevailing winds.
+  https://www.weather.gov/hfo/climate_summary
+* USGS watersheds: drainage area connects upstream precipitation to streamflow.
+  https://www.usgs.gov/water-science-school/science/watersheds-and-drainage-basins
+* US Forest Service: water needs of riparian and wetland vegetation.
+  https://research.fs.usda.gov/treesearch/41207
+* Red Blob Games: separate elevation/moisture fields and multiscale noise.
+  https://www.redblobgames.com/maps/terrain-from-noise/
+* Red Blob Mapgen4: wind/rainfall, terrain and drainage as connected systems.
+  https://www.redblobgames.com/maps/mapgen4/
+* Barnes, Lehman and Mulla: Priority-Flood depression filling.
+  https://arxiv.org/abs/1511.04463
+
+These are design references, not copied implementations. This is a stylized
+game ecology model; field values are normalized suitability, not measured
+degrees Celsius or millimeters of rain.
+
+Implementation
+
+1. Keep the approved mountain geometry. Use independently rotated gradient
+   noise for climate, with broad warped regions and weaker regional variation.
+2. Cache 4096-unit weather nodes and smoothly interpolate them. Temperature,
+   rain, seasonal drought and soil retention have separate spatial fields.
+   Sample terrain upwind to approximate uplift and rain shadows. Cooling with
+   elevation affects tree line, tropical suitability and snow.
+3. Compute available moisture from rain, heat, seasonality and soil retention.
+   Riverbanks add moisture according to distance and height above water.
+   Combine contributions from all nearby reaches to avoid nearest-river seams.
+4. Derive normalized overlapping meadow, woodland, tropical, wetland, dryland
+   and alpine weights. Only music chooses a dominant category. Ground texture
+   overlays, forest density and tree species use continuous suitability.
+   Actual tree placement and distant canopy use the same density/species rules.
+5. Collect rainfall-weighted runoff over twelve upstream graph steps. Breach
+   shallow pits within three drainage cells to connect more tributaries;
+   accept only strictly lower endpoints, with a maximum sampled cut of 110
+   units. Preserve deeper enclosed basins. Channels widen toward downstream
+   runoff and meander more on gentle slopes. All topology uses global doubles.
+6. Bound caches and index nearby reaches by drainage cell. Coarse terrain
+   footprints filter out subpixel riverbank detail instead of building distant
+   hydrology. Existing tree population ownership and mesh LOD are unchanged.
+
+Why not global Priority-Flood?
+
+It is a useful reference for removing artificial terrain pits, but a single
+whole-map flood needs a defined domain and outlets. Applying it independently
+to streamed chunks would invent outlets at their borders. This implementation
+instead uses bounded depression breaching with global node ownership, keeping
+generation independent of chunk arrival order. It does not implement global
+erosion, unrestricted watershed accumulation, sediment transport or seasonal
+water simulation. Very large basins remain approximations. Rivers still use
+the existing fine-mesh carving and water rendering pipeline.
+
+Verification
+
+tools/test_biomes.cpp checks normalized continuous ecology/species weights,
+weather cell seams, riparian response, drainage topology, strictly downhill
+water, protected original town, and coordinates through +/-1 trillion.
+tools/test_forest_kernel.cpp checks identical tree populations when splitting
+chunks and complementary LOD weights. tools/test_terrain_kernel.cpp checks
+foundations, roads, surface collision, balanced LOD and edge continuity.
+tools/preview_biomes.cpp exports the actual generator; render_ecology_maps.py
+plots its fields. Real-game screenshots use isolated test saves.
+
+Follow-up: mountain geometry, altitude ecology and terrain-aware channel routing
+were subsequently overhauled; see mountain-generation-research.txt for current
+behavior and validation.

@@ -1,5 +1,6 @@
 #include "world_origin.hpp"
 #include "town_terrain.hpp"
+#include "town_biomes.hpp"
 
 #include <array>
 #include <chrono>
@@ -7,6 +8,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <future>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <functional>
+#include <set>
+#include <optional>
 
 #include "camerafollow.hpp"
 #include "character.hpp"
@@ -32,6 +40,10 @@ struct Chunk {
     gfx::MeshHandle    snow = 0;
     std::array<int, 4> edges{};
     float              low = 0, high = 0;
+    BiomeChunk         biome;
+    unsigned indexCount=0;
+    std::vector<gfx::Vertex3D> vertices, snowVertices;
+    std::vector<uint32_t> indices;
 };
 
 using MeshKey = std::pair<terrain::Tile, std::array<int, 4>>;
@@ -39,6 +51,7 @@ using MeshKey = std::pair<terrain::Tile, std::array<int, 4>>;
 struct CachedChunk {
     Chunk    chunk;
     unsigned used = 0;
+    bool dirty = false;
 };
 
 std::map<MeshKey, CachedChunk> cache;
@@ -48,11 +61,58 @@ unsigned                       cacheClock = 0;
 double                         lastX = 1e30, lastZ = 1e30;
 int                            lastLevel = -1;
 bool walkRequested=false;
+unsigned terrainRevision=0;
+std::vector<terrain::Foundation> previousFoundations;
+std::vector<terrain::Road> previousRoads;
+
+// A single persistent CPU worker retains hydrology caches across jobs. GPU
+// allocations and publication stay on the render thread. Only one job is in
+// flight: rapid editor movement cannot accumulate an unbounded work queue.
+class TerrainWorker {
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::function<void()> task;
+    bool stopping=false;
+    std::thread thread;
+public:
+    TerrainWorker():thread([this] {
+        for (;;) {
+            std::function<void()> next;
+            { std::unique_lock lock(mutex); wake.wait(lock,[&]{return stopping || bool(task);});
+              if(stopping)return; next=std::move(task); task={}; }
+            next();
+        }
+    }) {}
+    ~TerrainWorker(){ {std::lock_guard lock(mutex);stopping=true;} wake.notify_one();thread.join(); }
+    std::future<Chunk> Submit(MeshKey key);
+};
+TerrainWorker &Worker(){static TerrainWorker worker;return worker;}
+std::future<Chunk> building;
+MeshKey buildingKey;
+unsigned buildingRevision=0;
+std::optional<Chunk> uploading;
+
+void Destroy(Chunk &c) {
+    gfx::DestroyMesh(c.mesh);gfx::DestroyMesh(c.snow);BiomeDestroy(c.biome);
+}
+bool Upload(Chunk &c, std::chrono::steady_clock::time_point deadline=std::chrono::steady_clock::time_point::max()) {
+    if(!c.mesh)c.mesh=gfx::CreateMesh(c.vertices,c.indices);
+    if(!c.snow && !c.snowVertices.empty())c.snow=gfx::CreateMesh(c.snowVertices,c.indices);
+    if(!BiomeUpload(c.biome,deadline))return false;
+    std::vector<gfx::Vertex3D>().swap(c.vertices);
+    std::vector<gfx::Vertex3D>().swap(c.snowVertices);
+    std::vector<uint32_t>().swap(c.indices);
+    return true;
+}
+
 
 void ClearChunks() {
+    ++terrainRevision;
+    if(uploading){Destroy(*uploading);uploading.reset();}
     for (auto &[key, value] : cache) {
         gfx::DestroyMesh(value.chunk.mesh);
         gfx::DestroyMesh(value.chunk.snow);
+        BiomeDestroy(value.chunk.biome);
     }
     cache.clear();
     active.clear();
@@ -83,7 +143,7 @@ std::array<int, 4> Edges(const terrain::Tile &t, const terrain::Selection &s) {
 }
 
 Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
-    constexpr int              n = terrain::Resolution;
+    const int n=t.level>=8?4:t.level>=4?8:terrain::Resolution;
     std::vector<gfx::Vertex3D> vertices;
     std::vector<uint32_t>      indices;
     std::vector<gfx::Vertex3D> snowVertices;
@@ -93,21 +153,21 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
     for (int z = 0; z <= n; z++) {
         for (int x = 0; x <= n; x++) {
             double wx = t.left() + x * step, wz = t.top() + z * step;
-            double h = terrain::Height(wx, wz);
+            double h = terrain::Height(wx, wz,step);
             if (x == 0 && edges[0] > t.level) {
-                h = terrain::EdgeHeight(wx, wz, edges[0], false);
+                h = terrain::EdgeHeight(wx, wz, edges[0]+(edges[0]>=8?2:edges[0]>=4?1:0), false);
             }
             if (x == n && edges[1] > t.level) {
-                h = terrain::EdgeHeight(wx, wz, edges[1], false);
+                h = terrain::EdgeHeight(wx, wz, edges[1]+(edges[1]>=8?2:edges[1]>=4?1:0), false);
             }
             if (z == 0 && edges[2] > t.level) {
-                h = terrain::EdgeHeight(wx, wz, edges[2], true);
+                h = terrain::EdgeHeight(wx, wz, edges[2]+(edges[2]>=8?2:edges[2]>=4?1:0), true);
             }
             if (z == n && edges[3] > t.level) {
-                h = terrain::EdgeHeight(wx, wz, edges[3], true);
+                h = terrain::EdgeHeight(wx, wz, edges[3]+(edges[3]>=8?2:edges[3]>=4?1:0), true);
             }
-            double        nx = terrain::Height(wx - 8, wz) - terrain::Height(wx + 8, wz);
-            double        nz = terrain::Height(wx, wz - 8) - terrain::Height(wx, wz + 8);
+            double        nx = terrain::Height(wx - 8, wz,step) - terrain::Height(wx + 8, wz,step);
+            double        nz = terrain::Height(wx, wz - 8,step) - terrain::Height(wx, wz + 8,step);
             double        length = std::sqrt(nx * nx + 256 + nz * nz);
             gfx::Vertex3D v{};
             v.position[0] = float(x * step);
@@ -121,8 +181,8 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
             v.uv[0] = float((std::fmod(t.left(), 200) + x * step) / 200);
             v.uv[1] = float((std::fmod(t.top(), 200) + z * step) / 200);
             double slope = 1 - 16 / length;
-            double rock = std::clamp(std::max((h - 900) / 2200, (slope - .18) * 3), 0.0, 1.0);
-            double snow = std::clamp((h - 8500 + 900 * terrain::Noise(wx / 900, wz / 900)) / 2600, 0.0, 1.0);
+            double rock = terrain::RockExposure(wx,wz,h,16/length);
+            double snow = terrain::FinishClimate(terrain::BaseClimateAt(wx,wz,h),h).snow;
             snow *= std::clamp((.8 - slope) * 2.5, 0.0, 1.0);
             v.color[0] = v.color[1] = v.color[2] = 128;
             v.color[3] = uint8_t(128 * rock);
@@ -139,7 +199,51 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
             indices.insert(indices.end(), {a, c, b, b, c, d});
         }
     }
-    return {gfx::CreateMesh(vertices, indices), hasSnow ? gfx::CreateMesh(snowVertices, indices) : gfx::kNullMesh, edges, low, high};
+    Chunk result;
+    result.edges=edges;result.low=low;result.high=std::max(high+1000,float(terrain::SeaLevel+20));
+    result.biome=BiomeBuild(t,vertices,indices);result.indexCount=unsigned(indices.size());
+    result.vertices=std::move(vertices);result.indices=std::move(indices);
+    if(hasSnow)result.snowVertices=std::move(snowVertices);
+    return result;
+}
+
+std::future<Chunk> TerrainWorker::Submit(MeshKey key) {
+    auto job=std::make_shared<std::packaged_task<Chunk()>>(
+        [key,foundations=terrain::Foundations(),roads=terrain::Roads()] {
+            terrain::Foundations()=foundations;terrain::Roads()=roads;
+            return Build(key.first,key.second);
+        });
+    auto result=job->get_future();
+    {std::lock_guard lock(mutex); task=[job]{(*job)();};}
+    wake.notify_one();return result;
+}
+
+// Compare old and new edits, including removed objects. Preserve every other
+// cached chunk and keep dirty chunks visible until their replacements are ready.
+void InvalidateEdits() {
+    struct Bounds {double x0,z0,x1,z1;};
+    std::vector<Bounds> bounds;
+    auto changes=[&](const auto &old,const auto &now,auto add) {
+        auto equal=[](const auto &a,const auto &b){return std::memcmp(&a,&b,sizeof(a))==0;};
+        for(const auto &v:old)if(std::none_of(now.begin(),now.end(),[&](const auto &n){return equal(v,n);}))add(v);
+        for(const auto &v:now)if(std::none_of(old.begin(),old.end(),[&](const auto &n){return equal(v,n);}))add(v);
+    };
+    changes(previousFoundations,terrain::Foundations(),[&](const auto &p){bounds.push_back({p.x-p.halfX-432,p.z-p.halfZ-432,p.x+p.halfX+432,p.z+p.halfZ+432});});
+    changes(previousRoads,terrain::Roads(),[&](const auto &r){bounds.push_back({std::min(r.x,r.endX)-232,std::min(r.z,r.endZ)-232,std::max(r.x,r.endX)+232,std::max(r.z,r.endZ)+232});});
+    previousFoundations=terrain::Foundations();previousRoads=terrain::Roads();
+    if(bounds.empty())return;
+    ++terrainRevision;
+    unsigned dirty=0;
+    for(auto &[key,value]:cache) {
+        const auto &t=key.first;
+        // Edge stitching and normal queries can sample beyond the tile border.
+        double margin=t.size()/4;
+        for(auto b:bounds)if(t.left()-margin<=b.x1 && t.left()+t.size()+margin>=b.x0 && t.top()-margin<=b.z1 && t.top()+t.size()+margin>=b.z0) {
+            value.dirty=true;++dirty;break;
+        }
+    }
+    pending=active;pendingCursor=0;
+    if(std::getenv("DC_TERRAIN_PERF"))std::fprintf(stderr,"terrain edit: invalidated %u of %zu cached chunks\n",dirty,cache.size());
 }
 
 void Update(double x, double z, int minimumLevel) {
@@ -177,23 +281,38 @@ void Update(double x, double z, int minimumLevel) {
         for (auto t : tiles) {
             pending.push_back({t, Edges(t, selection)});
         }
+        std::stable_sort(pending.begin(),pending.end(),[&](const auto &a,const auto &b){return terrain::Distance(a.first,x,z)<terrain::Distance(b.first,x,z);});
         pendingCursor = 0;
         planned = true;
     }
     bool initial = active.empty();
     // Bound terrain work during movement. Meshes are cached with their seam
     // topology, so revisiting a boundary does not destroy and recreate them.
-    while (pendingCursor < pending.size()) {
-        if (!initial && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - perfStart).count() >= 2.0) {
-            break;
+    while (pendingCursor < pending.size() || building.valid() || uploading) {
+        if(building.valid()) {
+            if(!initial && building.wait_for(std::chrono::seconds(0))!=std::future_status::ready)break;
+            uploading=building.get();
         }
-        const auto &key = pending[pendingCursor++];
-        auto        it = cache.find(key);
-        if (it == cache.end()) {
-            it = cache.emplace(key, CachedChunk{Build(key.first, key.second), cacheClock}).first;
-            ++built;
+        if(uploading) {
+            if(buildingRevision!=terrainRevision){Destroy(*uploading);uploading.reset();}
+            else {
+                auto deadline=initial?std::chrono::steady_clock::time_point::max():perfStart+std::chrono::milliseconds(2);
+                if(!Upload(*uploading,deadline))break;
+                auto it=cache.find(buildingKey);
+                if(it!=cache.end()){Destroy(it->second.chunk);it->second={std::move(*uploading),cacheClock,false};}
+                else cache.emplace(buildingKey,CachedChunk{std::move(*uploading),cacheClock,false});
+                uploading.reset();++built;
+            }
         }
-        it->second.used = cacheClock;
+        if(pendingCursor>=pending.size())break;
+        if(!initial && std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-perfStart).count()>=2.)break;
+        const auto &key=pending[pendingCursor];
+        auto it=cache.find(key);
+        if(it!=cache.end() && !it->second.dirty){it->second.used=cacheClock;++pendingCursor;continue;}
+        buildingKey=key;buildingRevision=terrainRevision;
+        building=Worker().Submit(key);
+        // Cursor advances only after the completed chunk is installed. A newer
+        // placement revision discards stale work and resubmits the same tile.
     }
     if (!pending.empty() && pendingCursor == pending.size()) {
         active.swap(pending);
@@ -222,6 +341,7 @@ void Update(double x, double z, int minimumLevel) {
             auto it = cache.find(oldest[i].second);
             gfx::DestroyMesh(it->second.chunk.mesh);
             gfx::DestroyMesh(it->second.chunk.snow);
+            BiomeDestroy(it->second.chunk.biome);
             cache.erase(it);
         }
     }
@@ -243,11 +363,29 @@ bool TownTerrainEnabled(const CEditGround *ground) { return ground && ground->ma
 
 bool TownTerrainRequestWalk(float x,float z) {
     if(!TownTerrainEnabled(pEditGround))return true;
-    walkRequested=true;
-    for(float dx:{-96.f,0.f,96.f})for(float dz:{-96.f,0.f,96.f}) {
-        terrain::Tile tile{int64_t(std::floor((world::X(x)+dx)/terrain::BaseSize)),int64_t(std::floor((world::Z(z)+dz)/terrain::BaseSize)),0};
-        if(std::none_of(active.begin(),active.end(),[&](const auto& key){return key.first==tile;}))return false;
+    const auto start=std::chrono::steady_clock::now();
+    if(building.valid()){auto discarded=building.get();}
+    if(uploading){Destroy(*uploading);uploading.reset();}
+    double wx=world::X(x),wz=world::Z(z);
+    // Refine only the arrival neighbourhood synchronously, retaining the
+    // existing far-world coverage. Trees must be ready before revealing land.
+    std::vector<terrain::Tile> tiles;
+    auto refine=[&](auto &&self,terrain::Tile tile)->void {
+        if(tile.level>0 && terrain::Distance(tile,wx,wz)<std::max(256.,tile.size()*.8)) {
+            for(int zz=0;zz<2;zz++)for(int xx=0;xx<2;xx++)self(self,{tile.x*2+xx,tile.z*2+zz,tile.level-1});
+        } else tiles.push_back(tile);
+    };
+    if(active.empty())for(auto t:terrain::Select(wx,wz,5))refine(refine,t);
+    else for(const auto &key:active)refine(refine,key.first);
+    terrain::Selection selection;for(auto t:tiles)selection.emplace(t,0);
+    std::vector<MeshKey> landing;unsigned built=0;
+    for(auto t:tiles) {
+        MeshKey key{t,Edges(t,selection)};
+        if(!cache.contains(key) || cache.at(key).dirty){auto job=Worker().Submit(key);auto chunk=job.get();Upload(chunk);if(cache.contains(key))Destroy(cache.at(key).chunk);cache.insert_or_assign(key,CachedChunk{std::move(chunk),cacheClock});built++;}
+        landing.push_back(key);
     }
+    active.swap(landing);pending.clear();pendingCursor=0;lastX=wx;lastZ=wz;lastLevel=-1;
+    if(std::getenv("DC_TERRAIN_TRACE")||std::getenv("DC_TERRAIN_PERF"))std::fprintf(stderr,"terrain: instant landing %.3f ms built %u destination %.2f %.2f\n",std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(),built,wx,wz);
     walkRequested=false;
     if(std::getenv("DC_TERRAIN_TRACE"))std::fprintf(stderr,"terrain: landing ready %.2f %.2f lod 0\n",x,z);
     return true;
@@ -259,13 +397,13 @@ void TownTerrainDraw(CEditGround *ground) {
         ClearChunks();
         return;
     }
-    if (WorldGeoramaFoundations(ground)) {
-        ClearChunks();
-    }
+    WorldGeoramaFoundations(ground);
+    InvalidateEdits();
     WorldGeoramaTest(ground);
     world::TestTick();
     // Prepare is idempotent; map loaders may reuse the same arena address.
     Prepare(ground);
+    BiomePrepare(ground);
     static int testTicks = 0;
     ++testTicks;
     if (testTicks == 120 && Chara) {
@@ -304,7 +442,7 @@ void TownTerrainDraw(CEditGround *ground) {
         std::fprintf(stderr,"precision camera: tick %d player %.9g %.9g eye %.9g %.9g ref %.9g %.9g\n",testTicks,pos[0],pos[2],eye[0],eye[2],target[0],target[2]);
     }
     if (std::getenv("DC_TERRAIN_TRACE") && testTicks % 120 == 0) {
-        std::fprintf(stderr,"terrain surface: %.5f foundations %zu\n",world::SurfaceHeight(pos[0],pos[2]),terrain::foundations.size());
+        std::fprintf(stderr,"terrain surface: %.5f foundations %zu\n",world::SurfaceHeight(pos[0],pos[2]),terrain::Foundations().size());
         std::fprintf(stderr, "terrain: player %.2f %.2f %.2f ground %.2f far %.0f\n", world::X(pos[0]), pos[1], world::Z(pos[2]), world::Height(pos[0], pos[2]), mgRenderInfo.far[2]);
     }
     auto                      *texture = TexManager.GetTexture(const_cast<char *>("e01b01"), -1);
@@ -362,6 +500,8 @@ void TownTerrainDraw(CEditGround *ground) {
     // EditLoop extends the shared reverse-depth projection for Norune.
     auto state = Draw3DState(info, false);
     int  drawn = 0;
+    struct WaterDraw { const BiomeChunk* chunk; gfx::MeshConstants constants; gfx::MeshTransform transform; };
+    std::vector<WaterDraw> waterDraws;
     state.blend = false;
     state.cull = gfx::CullMode::None;
     for (const auto &key : active) {
@@ -408,8 +548,9 @@ void TownTerrainDraw(CEditGround *ground) {
         constants.clip_plane[1][3] = 2e-6f; // clear-air aerosol scattering, per metre.
         float white[4] = {1, 1, 1, 1}, black[4] = {0, 0, 0, 0};
         Draw3DMaterial(constants, info, white, white, black);
-        gfx::DrawMesh(chunk.mesh, 0, terrain::Resolution * terrain::Resolution * 6, constants, binding, state, &transform);
-        constants.flags |= gfx::kMeshVertexColor | gfx::kMeshWorldUv;
+        gfx::DrawMesh(chunk.mesh, 0, chunk.indexCount, constants, binding, state, &transform);
+        BiomeDraw(chunk.biome,constants,state,transform,testTicks,0);
+        constants.flags |= gfx::kMeshVertexColor | gfx::kMeshWorldUv | gfx::kMeshTerrainTriplanar;
         constants.world_uv[0][0] = 1.f / 240;
         constants.world_uv[0][3] = float(std::fmod(tile.left(), 240) / 240);
         constants.world_uv[1][2] = 1.f / 240;
@@ -419,11 +560,17 @@ void TownTerrainDraw(CEditGround *ground) {
         overlay.alpha = {};
         overlay.depth_write = false;
         overlay.depth_test = gfx::DepthTest::GEqual;
-        gfx::DrawMesh(chunk.mesh, 0, terrain::Resolution * terrain::Resolution * 6, constants, rockBinding, overlay, &transform);
+        gfx::DrawMesh(chunk.mesh, 0, chunk.indexCount, constants, rockBinding, overlay, &transform);
         if (chunk.snow) {
-            gfx::DrawMesh(chunk.snow, 0, terrain::Resolution * terrain::Resolution * 6, constants, snowBinding, overlay, &transform);
+            gfx::DrawMesh(chunk.snow, 0, chunk.indexCount, constants, snowBinding, overlay, &transform);
         }
+        constants.flags &= ~(gfx::kMeshWorldUv | gfx::kMeshTerrainTriplanar);
+        BiomeDraw(chunk.biome,constants,state,transform,testTicks,1);
+        if(chunk.biome.water.mesh)waterDraws.push_back({&chunk.biome,constants,transform});
     }
+    // Forest geometry is submitted with its owning terrain chunk above.
+    // Translucent rivers follow every opaque chunk, so a later bank cannot paint over water.
+    for(const auto&draw:waterDraws)BiomeDraw(*draw.chunk,draw.constants,state,draw.transform,testTicks,2);
     if (std::getenv("DC_TERRAIN_PERF")) {
         std::fprintf(stderr, "terrain draw: %d of %zu chunks\n", drawn, active.size());
     }

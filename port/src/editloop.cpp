@@ -1,4 +1,5 @@
 #include "world_origin.hpp"
+#include "biome_music.hpp"
 #include "common.h"
 
 #include <libgraph.h>
@@ -7,6 +8,7 @@
 #include <sifdev.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -226,6 +228,10 @@ PORT_OVERRIDE int EdSetMapFlag(int flag_no, int value) {
  * @size 0x1FE8
  */
 PORT_OVERRIDE int EditLoop() {
+    struct TickTimer {
+        std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
+        ~TickTimer(){if(std::getenv("DC_TERRAIN_PERF"))std::fprintf(stderr,"town tick: %.3f ms mode %d\n",std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(),int(GameMode));}
+    } tickTimer;
     world::BeginTick();
     goto_return_menu = 0;
 
@@ -1174,6 +1180,10 @@ PORT_OVERRIDE int EditLoop() {
     }
 
     SndStep();
+    sceVu0FVECTOR musicPosition{};
+    if (Chara) Chara->GetPosition(musicPosition);
+    BiomeMusicTick(false, MapNo == 0 && Chara && loop_counter > 60 && GameMode != ED_MODE_EVENT,
+                   world::X(musicPosition[0]), world::Z(musicPosition[2]));
     loop_counter++;
     key_counter++;
     sound_off_cnt--;

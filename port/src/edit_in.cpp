@@ -1,4 +1,5 @@
 #include "common.h"
+#include "biome_music.hpp"
 
 #include <libvu0.h>
 
@@ -893,6 +894,8 @@ PORT_OVERRIDE int EditInLoop() {
     EdIn_key_counter++;
     EdIn_loop_counter++;
     SndStep();
+    BiomeMusicTick(true, EdIn_loop_counter > 60 && GameMode != ED_IN_MODE_EVENT &&
+                   GameMode != ED_IN_MODE_DOOR_OPEN && GameMode != ED_IN_MODE_LEAVE);
     return 0;
 }
 

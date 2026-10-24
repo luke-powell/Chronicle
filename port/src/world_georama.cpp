@@ -40,8 +40,8 @@ void WorldGeoramaRegister(CSaveData *save, CEditGround *ground) {
     }
     world::Reset();
     WorldGeoramaBuildPlatform(ground);
-    terrain::foundations.clear();
-    terrain::roads.clear();
+    terrain::Foundations().clear();
+    terrain::Roads().clear();
     ++foundationRevision;
     bool                      migrate = !save->GetEditPartsInfo(0, MayorPlatform)->obtained;
     static EPARTS_INFO_HEADER headers[2];
@@ -611,17 +611,17 @@ bool WorldGeoramaFoundations(CEditGround *ground) {
         auto global = world::PositionOf(p.pos);
         next.push_back({global.x, global.z, hx, hz, y});
     }
-    bool changed = next.size() != terrain::foundations.size() || roadPositions != lastRoads;
+    bool changed = next.size() != terrain::Foundations().size() || roadPositions != lastRoads;
     if (!changed) {
         for (size_t i = 0; i < next.size(); i++) {
             auto &a = next[i];
-            auto &b = terrain::foundations[i];
+            auto &b = terrain::Foundations()[i];
             changed |= a.x != b.x || a.z != b.z || a.halfX != b.halfX || a.halfZ != b.halfZ || a.height != b.height;
         }
     }
     if (changed) {
-        terrain::foundations = std::move(next);
-        terrain::roads.clear();
+        terrain::Foundations() = std::move(next);
+        terrain::Roads().clear();
         lastRoads = roadPositions;
         ++foundationRevision;
         std::vector<double>           heights(roadParts.size());
@@ -631,7 +631,7 @@ bool WorldGeoramaFoundations(CEditGround *ground) {
             auto  *p = roadParts[i];
             double sum = 0;
             int    hits = 0;
-            for (auto &f : terrain::foundations) {
+            for (auto &f : terrain::Foundations()) {
                 double d = std::hypot(std::max(0.0, std::abs(world::X(p->pos[0]) - f.x) - f.halfX), std::max(0.0, std::abs(world::Z(p->pos[2]) - f.z) - f.halfZ));
                 if (d <= 55) {
                     sum += f.height;
@@ -668,11 +668,11 @@ bool WorldGeoramaFoundations(CEditGround *ground) {
         for (size_t i = 0; i < roadParts.size(); i++) {
             auto *p = roadParts[i];
             if (neighbors[i].empty()) {
-                terrain::roads.push_back({world::X(p->pos[0]), world::Z(p->pos[2]), world::X(p->pos[0]), world::Z(p->pos[2]), heights[i], heights[i]});
+                terrain::Roads().push_back({world::X(p->pos[0]), world::Z(p->pos[2]), world::X(p->pos[0]), world::Z(p->pos[2]), heights[i], heights[i]});
             }
             for (int j : neighbors[i]) {
                 if (j > int(i)) {
-                    terrain::roads.push_back({world::X(p->pos[0]), world::Z(p->pos[2]), world::X(roadParts[j]->pos[0]), world::Z(roadParts[j]->pos[2]), heights[i], heights[j]});
+                    terrain::Roads().push_back({world::X(p->pos[0]), world::Z(p->pos[2]), world::X(roadParts[j]->pos[0]), world::Z(roadParts[j]->pos[2]), heights[i], heights[j]});
                 }
             }
         }

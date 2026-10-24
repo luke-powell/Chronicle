@@ -50,6 +50,9 @@ std::map<float *, Tracked>      positions;
 std::map<CEditArea *, Position> areaOrigins;
 nlohmann::json                  savedParts = nlohmann::json::array();
 std::set<float *>               shifted;
+nlohmann::json savedPlayer;
+bool restorePlayer=false;
+int restoreWalkTicks=0;
 
 // Keep the double authority when projecting far inactive objects to floats.
 // Only actual changes to the native position feed back into world coordinates;
@@ -233,6 +236,36 @@ void BeginTick() {
     if (!active || !TownTerrainEnabled(pEditGround)) {
         return;
     }
+    static bool previewSiteApplied=false;
+    if(!previewSiteApplied) {
+        previewSiteApplied=true;
+        if(const char *site=std::getenv("DC_WORLD_PREVIEW_SITE")) {
+            double x,z;float yaw=0;
+            if(std::sscanf(site,"%lf,%lf,%f",&x,&z,&yaw)>=2) {
+                savedPlayer={{"town",0},{"x",x},{"y",terrain::SurfaceHeight(x,z)},{"z",z},{"yaw",yaw}};
+                restorePlayer=true;restoreWalkTicks=0;
+            }
+        }
+    }
+    if(GameMode!=ED_MODE_WALK)restoreWalkTicks=0;
+    if(restorePlayer && Chara && GameMode==ED_MODE_WALK && ++restoreWalkTicks<=2) {
+        // The retail arrival event can overwrite the first placement. Keep the
+        // restore armed until two consecutive controllable walking ticks.
+        if(restoreWalkTicks==2)restorePlayer=false;
+        Position p{savedPlayer.at("x"),savedPlayer.at("y"),savedPlayer.at("z")};
+        Rebase(std::round(p.x/3200)*3200,std::round(p.z/3200)*3200);
+        // Preserve the saved elevation (including platforms), lifting only if
+        // a later terrain edit would otherwise restore the player underground.
+        p.y=std::max(p.y,terrain::SurfaceHeight(p.x,p.z));
+        Assign(Chara->pos,p);Chara->SetPosition(Chara->pos);
+        Chara->GetVelocity()->x=Chara->GetVelocity()->y=Chara->GetVelocity()->z=0;
+        float yaw=savedPlayer.value("yaw",0.f);
+        Chara->SetRotation(0,yaw,0);
+        MainCamera.SetFollow(Chara->pos[0],Chara->pos[1]+14,Chara->pos[2]);
+        MainCamera.SetAngleSoon(yaw-3.14159265f);MainCamera.Step(-1);
+        gfx::CutInterpolation();
+        std::fprintf(stderr,"world player restored: %.17g %.17g %.17g yaw %.9g\n",p.x,p.y,p.z,yaw);
+    }
     // Interior coordinates belong to their own retail scene.
     if (GameMode == ED_MODE_MAP_JUMP) {
         Rebase(0, 0);
@@ -287,6 +320,7 @@ void Loaded(CEditGround *g) {
 }
 
 void Load(const std::filesystem::path &dir) {
+    savedPlayer=nullptr;restorePlayer=false;restoreWalkTicks=0;
     savedParts = nlohmann::json::array();
     try {
         std::ifstream f(dir / "world.json");
@@ -310,6 +344,12 @@ void Load(const std::filesystem::path &dir) {
             (void) p.at("rotation").get<int>();
         }
         savedParts = j.at("parts");
+        if(j.contains("player") && j["player"].is_object()) {
+            const auto &p=j["player"];
+            bool valid=p.value("town",-1)==0;
+            for(const char *axis:{"x","y","z","yaw"})valid=valid && p.contains(axis) && p[axis].is_number() && std::isfinite(p[axis].get<double>());
+            if(valid){savedPlayer=p;restorePlayer=true;}
+        }
     } catch (const std::exception &e) {
         std::fprintf(stderr, "world save: ignoring invalid precision data: %s\n", e.what());
     }
@@ -340,11 +380,17 @@ void Leave() {
 
 void Save(const std::filesystem::path &dir) {
     Capture();
+    savedPlayer=nullptr;
+    if(active && TownTerrainEnabled(pEditGround) && Chara && GameMode!=ED_MODE_MAP_JUMP) {
+        auto p=PositionOf(Chara->pos);float rotation[4]{};Chara->GetRotation(rotation);
+        savedPlayer={{"town",0},{"x",p.x},{"y",p.y},{"z",p.z},{"yaw",rotation[1]}};
+    }
     try {
         auto data = nlohmann::json{
             {"version",          1               },
             {"save_fingerprint", Fingerprint(dir)},
-            {"parts",            savedParts      }
+            {"parts",            savedParts      },
+            {"player",           savedPlayer     }
         }
                         .dump(2);
         if (FilesWrite(dir / "world.json", data.data(), data.size(), true) != FilesResult::kWritten) {

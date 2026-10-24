@@ -4,6 +4,7 @@
 #include <cmath>
 #include <vector>
 #include "town_terrain.hpp"
+#include "world_origin.hpp"
 #include "collision.hpp"
 
 #include "character.hpp"
@@ -238,11 +239,17 @@ PORT_OVERRIDE float EdGetRXf(int mode) {
 PORT_OVERRIDE float EdGetRYf(int mode) {
     if (PortEdCheckKeyMode(mode)) {
         CCameraFollow *camera = EdMoveCharaInfo.camera;
-        float          stick = GamePad.GetRYf();
+        float          stick = -GamePad.GetRYf();
         if (camera == nullptr) {
             return stick;
         }
-        float reading = MouseLookRise(camera, stick, EdDebugCameraFlag == 0 ? 30.0f : INFINITY, 5.0f);
+        float floor = -camera->GetDistance()*11.4300523f;
+        if (EdDebugCameraFlag == 0 && TownTerrainEnabled(pEditGround)) {
+            floor=std::max(floor,float(world::SurfaceHeight(camera->pos[0],camera->pos[2]))+1.6f-camera->follow[1]);
+        }
+        float reading = MouseLookRise(camera, stick, EdDebugCameraFlag == 0 ? 30.0f : INFINITY, floor);
+        if (EdDebugCameraFlag == 0) reading=std::min(reading,camera->GetHeight()-floor);
+        if (std::getenv("DC_CAMERA_PITCH_TRACE")) std::fprintf(stderr,"walking orbit: height %.3f distance %.3f\n",camera->GetHeight(),camera->GetDistance());
         // Retail ignores RY at the ceiling, including a request to lower the camera. Let a
         // native mouse reversal leave that ceiling; the subsequent floor checks still apply.
         if (EdDebugCameraFlag == 0 && camera->GetHeight() >= 30.0f && InputGetMouseLook().pitch > 0.0f) {
