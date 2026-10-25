@@ -624,6 +624,16 @@ inline double LandHeight(double x,double z) {
     auto c=CanyonLandform(x,z);
     if(c.weight>=1)return c.height;
     double base=ContinentalLandHeight(x,z);
+    // The surrounding lowland meets the canyon floors, not the cliff crowns.
+    // The district is an additive mesa above this shared ground datum. A broad
+    // apron reconnects that datum to continental relief outside the district.
+    auto owner=canyon::Owner(x,z);
+    double outline=canyon::Outline(x-owner.x,z-owner.z,owner.seed);
+    if(outline<6000){
+        auto centre=canyon::Centre(owner);double datum=ContinentalLandHeight(centre[0],centre[1]);
+        double suitability=(1-Smooth(1800,3500,datum))*Smooth(SeaLevel,SeaLevel+150,datum);
+        base=std::lerp(base,datum,(1-Smooth(0,6000,outline))*suitability);
+    }
     return std::lerp(base,c.height,c.weight);
 }
 

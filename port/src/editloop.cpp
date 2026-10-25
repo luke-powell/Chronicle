@@ -787,6 +787,16 @@ PORT_OVERRIDE int EditLoop() {
         }
     }
 
+    if (TownTerrainEnabled(pEditGround) && std::getenv("DC_WORLD_PREVIEW_SITE")) {
+        if(const char *shot=std::getenv("DC_WORLD_PREVIEW_CAMERA")){
+            double x,y,z,tx,ty,tz;
+            if(std::sscanf(shot,"%lf,%lf,%lf,%lf,%lf,%lf",&x,&y,&z,&tx,&ty,&tz)==6){
+                NowCamera->SetPos(nullptr,world::LocalX(x),float(y),world::LocalZ(z));
+                NowCamera->SetRef(world::LocalX(tx),float(ty),world::LocalZ(tz));NowCamera->CCamera::Step(-1);
+            }
+        }
+    }
+
     sceVu0FMATRIX view;
     sceVu0FVECTOR eye;
 

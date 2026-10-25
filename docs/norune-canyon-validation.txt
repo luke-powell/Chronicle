@@ -1,0 +1,34 @@
+Norune canyon validation, 2026-10-25
+
+Native artwork: e01b02 outlet floor, e01b06 wall, e01b05 crown.
+The crown chart is mirrored at its clamped edges, not replaced with generic grass.
+Raised mesa datum: outside apron and canyon floors share ground elevation.
+Crown relief: broad lattice-aligned variation, bounded to preserve flat floors.
+
+Native connection: clip actual waku triangles and follow their connected boundary
+(not radial angle order). Interpolate source UVs and normals at the shared edge.
+167 edges, zero unpaired endpoints; maximum positional gap 0.000135838 units.
+UV error 0.000001550; normal error 0.000001252.
+Retained native cliffs use the same physical atmosphere as the generated collar.
+
+Validation:
+- Build darkcloud-canyon-preview.exe separately, leaving existing game sessions alone.
+- test_canyon: exact footprint, one exit, flat floors, vegetation exclusion pass.
+- test_canyon_navigation: 9710 route centres, connected network pass.
+- test_canyon_mesa: 62 raised perimeter sections, rounded profile pass.
+- test_norune_collision: gate, turn, seam, exit, bend, plateau all pass.
+- Full scene: 3418 submitted triangles checked, zero collision mismatches.
+- test_canyon_facets: 2825 actual rendered facets, max height error .02818 units.
+- compare_canyon_mesh.py --check: native-relative shape/density/slope checks pass.
+- compare_canyon_crowns.py: sampled final native crown face angles 4.91-26.54
+  degrees; sampled generated final face 6.76 degrees.
+
+Local evidence in ignored port/run/mod-tests/integration:
+  norune-final-overview.png (texture/height variation)
+  norune-final-crown.png (ground-level crown)
+  norune-complete-seam.png (full scene native outlet)
+
+Remaining visual limitation: one ground-level crown view exposes a triangular
+lighting patch on a large wall face. It disappears with lighting disabled, but
+moving directional-light clamping to fragments did not improve it; that shader
+experiment was removed. Do not describe all lighting artifacts as eliminated.

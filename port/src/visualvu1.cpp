@@ -489,7 +489,8 @@ void Draw3DDrawVisual(const Draw3DVisual &visual, const float model[4][4], const
         return;
     }
     bool lit = info.shadow_pass == 0 && info.unlit == 0;
-    bool fog = info.fog_enabled != 0 && info.shadow_pass == 0;
+    bool atmosphere = visual.native_terrain && info.shadow_pass == 0;
+    bool fog = info.fog_enabled != 0 && info.shadow_pass == 0 && !atmosphere;
 
     gfx::MeshConstants constants = {};
     gfx::MeshTransform transform;
@@ -504,6 +505,25 @@ void Draw3DDrawVisual(const Draw3DVisual &visual, const float model[4][4], const
     } else {
         constants.flags = (lit ? gfx::kMeshLit : 0u) | (visual.vertex_colour ? gfx::kMeshVertexColor : 0u) |
                           (fog ? gfx::kMeshFog : 0u);
+    }
+
+    if (atmosphere) {
+        // The retained town cliffs and their procedural collar must scatter the
+        // same light. Retail distance fog otherwise exposes the exact join.
+        constants.flags |= gfx::kMeshAtmosphere;
+        for (int axis = 0; axis < 3; ++axis) {
+            float length2 = 0, camera = 0, sun = 0;
+            for (int component = 0; component < 3; ++component) {
+                float basis = model[axis][component];
+                length2 += basis * basis;
+                camera += basis * (info.view_position[component] - model[3][component]);
+                sun -= basis * constants.light_direction[0][component];
+            }
+            constants.clip_plane[0][axis] = camera / std::max(length2, 1e-8f);
+            constants.clip_plane[1][axis] = sun / std::sqrt(std::max(length2, 1e-8f));
+        }
+        constants.clip_plane[0][3] = .1f;
+        constants.clip_plane[1][3] = 2e-6f;
     }
 
     gfx::DrawState state = Draw3DState(info, fog);
@@ -521,7 +541,7 @@ void Draw3DDrawVisual(const Draw3DVisual &visual, const float model[4][4], const
     }
 
     static const float kWhite[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    uint32_t           base_flags = constants.flags;
+    uint32_t           base_flags = constants.flags | (visual.native_terrain ? gfx::kMeshTerrainNative : 0u);
     for (size_t strip_index = 0; strip_index < visual.strips.size();) {
         const Draw3DStrip &strip = visual.strips[strip_index++];
         uint32_t           index_count = strip.index_count;

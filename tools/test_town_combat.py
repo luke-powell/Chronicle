@@ -12,7 +12,7 @@ from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-EXE = ROOT / "port/build/windows-x64-release/darkcloud.exe"
+EXE = Path(os.environ.get("DC_TEST_EXE", str(ROOT / "port/build/windows-x64-release/darkcloud.exe")))
 OUT = ROOT / "port/run/mod-tests/integration"
 
 

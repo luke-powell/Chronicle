@@ -80,7 +80,7 @@ constexpr double FacetSize=128;
 inline double RawDistance(double x,double z){
  auto d=Owner(x,z);double u=x-d.x,v=z-d.z;
  double warp=Smooth(1800,2800,std::hypot(u,v));
- return Corridors().distance({u+warp*80*std::sin(v/510+Unit(d.seed)*6),v+warp*60*std::sin(u/630+Unit(d.seed+1)*6)});
+ return std::min(Corridors().distance({u+warp*80*std::sin(v/510+Unit(d.seed)*6),v+warp*60*std::sin(u/630+Unit(d.seed+1)*6)}),65-Outline(u,v,d.seed));
 }
 inline double FacetSample(double px,double pz){
    struct Entry{int64_t x=0,z=0;double distance=0;bool valid=false;};
@@ -104,8 +104,38 @@ inline double FacetDistance(double x,double z){
  if(a+d<b+c)return u>=v?a*(1-u)+b*(u-v)+d*v:a*(1-v)+c*(v-u)+d*u;
  return u+v<=1 ? a*(1-u-v)+b*u+c*v : b*(1-v)+c*(1-u)+d*(u+v-1);
 }
+// Native crown heights vary by tens of units across broad, irregular facets.
+// Sample that relief on the very same lattice/diagonal as the canyon contours.
+inline double CrownSample(double x,double z){
+ struct Entry{int64_t x=0,z=0;double h=0;bool valid=false;};
+ static thread_local std::array<Entry,4096> cache;
+ int64_t ix=int64_t(std::floor(x/FacetSize)),iz=int64_t(std::floor(z/FacetSize));auto &e=cache[Hash(uint64_t(ix)^Hash(uint64_t(iz)))&4095];
+ if(!e.valid||e.x!=ix||e.z!=iz)e={ix,iz,16*std::sin(x/310)+13*std::sin(z/430+1.2)+8*std::sin((x+z)/190+2.1),true};
+ return e.h;
+}
+inline double CrownRelief(double x,double z){
+ double sx=std::floor(x/FacetSize)*FacetSize,sz=std::floor(z/FacetSize)*FacetSize,u=(x-sx)/FacetSize,v=(z-sz)/FacetSize;
+ double a=CrownSample(sx,sz),b=CrownSample(sx+FacetSize,sz),c=CrownSample(sx,sz+FacetSize),d=CrownSample(sx+FacetSize,sz+FacetSize);
+ if(FacetFlip(x,z))return u>=v?a*(1-u)+b*(u-v)+d*v:a*(1-v)+c*(v-u)+d*u;
+ return u+v<=1?a*(1-u-v)+b*u+c*v:b*(1-v)+c*(1-u)+d*(u+v-1);
+}
+// A broad grassy shoulder rolls into the crown instead of meeting it at a
+// single hard crease. The mesher clips at these exact same profile knots.
+inline constexpr std::array<double,5> ProfileCuts{65,82,120,175,240};
+inline constexpr std::array<double,5> ProfileHeights{0,105,153,187,200};
 inline double Profile(double distance){
- return 105*std::clamp((distance-65)/17.,0.,1.)+95*std::clamp((distance-82)/123.,0.,1.);
+ double h=0;for(size_t i=1;i<ProfileCuts.size();i++)
+   h+=(ProfileHeights[i]-ProfileHeights[i-1])*std::clamp((distance-ProfileCuts[i-1])/(ProfileCuts[i]-ProfileCuts[i-1]),0.,1.);
+ return h;
+}
+inline double ProfileGradient(double distance){
+ // Shared vertex normals across the shoulder and crown. Keep the flat floor
+ // separate, as in the native wall mesh, rather than tilting the whole floor.
+ constexpr std::array<double,5> angles{1.4104,1.143,.728,.376,0};
+ if(distance<65||distance>=240)return 0;
+ for(size_t i=1;i<ProfileCuts.size();i++)if(distance<=ProfileCuts[i])
+   return std::tan(std::lerp(angles[i-1],angles[i],(distance-ProfileCuts[i-1])/(ProfileCuts[i]-ProfileCuts[i-1])));
+ return 0;
 }
 inline double WallDistance(double x,double z){
  auto owner=Owner(x,z);double r=std::hypot(x,z),distance=FacetDistance(x,z);
@@ -156,14 +186,38 @@ inline double ShellHeight(double x,double z){
  double t=std::clamp(r/8.,0.,double(ShellRadii-1));int k=std::min(int(t),ShellRadii-2);double v=t-k;
  return std::lerp(std::lerp(double(s.heights[i*ShellRadii+k]),double(s.heights[i*ShellRadii+k+1]),v),std::lerp(double(s.heights[j*ShellRadii+k]),double(s.heights[j*ShellRadii+k+1]),v),u);
 }
+// Exact triangles of the native-to-procedural collar, published before workers
+// start. Height queries and collision use this same surface, not a radial raster.
+constexpr double JoinExtent=2048;
+struct JoinTriangle { std::array<std::array<float,3>,3> p; };
+struct JoinSurface {
+ std::vector<JoinTriangle> triangles;
+ std::array<std::vector<unsigned>,32*32> bins;
+ bool ready=false;
+};
+inline JoinSurface &TownJoin(){static JoinSurface s;return s;}
+inline bool JoinHeight(double x,double z,double &height){
+ const auto &s=TownJoin();if(!s.ready||std::abs(x)>JoinExtent||std::abs(z)>JoinExtent)return false;
+ int ix=std::clamp(int((x+JoinExtent)/128),0,31),iz=std::clamp(int((z+JoinExtent)/128),0,31);
+ for(auto i:s.bins[iz*32+ix]){
+  const auto &p=s.triangles[i].p;const auto &a=p[0],&b=p[1],&c=p[2];
+  double den=(b[2]-c[2])*(a[0]-c[0])+(c[0]-b[0])*(a[2]-c[2]);if(std::abs(den)<1e-8)continue;
+  double u=((b[2]-c[2])*(x-c[0])+(c[0]-b[0])*(z-c[2]))/den;
+  double v=((c[2]-a[2])*(x-c[0])+(a[0]-c[0])*(z-c[2]))/den;
+  if(u>=-1e-7&&v>=-1e-7&&u+v<=1.0000001){height=u*a[1]+v*b[1]+(1-u-v)*c[1];return true;}
+ }
+ return false;
+}
 inline Sample At(double x,double z){
  auto d=Owner(x,z);double u=x-d.x,v=z-d.z,r=std::hypot(u,v);
  if(r>=26000)return {};
- double weight=1-Smooth(-1200,1200,Outline(u,v,d.seed));
+ double weight=1-Smooth(0,200,Outline(u,v,d.seed));
  if(weight==0)return {};
  // Each district has the same scale, with seeded bends away from the town.
  double distance=WallDistance(x,z);
  double height=Profile(distance);
+ double allowance=std::max(0.,(height-105)*.4);
+ height+=std::clamp(CrownRelief(x,z),-allowance,allowance);
  double face=height/WallHeight;
  if(d.ix==0&&d.iz==0){
    double native=ShellHeight(x,z),ridge=RidgeRadius(x,z);
@@ -175,10 +229,11 @@ inline Sample At(double x,double z){
    // The radial native raster is a join reference, not a wall generator:
    // extending it produces a corrugated skirt at the cliff foot. Finish the
    // blend beneath the retained native mesh, then use one clean cross-section.
-   connector+=(native-WallHeight)*Smooth(105,200,connector)*(1-Smooth(ridge,ridge+300,r));
+   connector+=(native-WallHeight-CrownRelief(x,z))*Smooth(105,200,connector)*(1-Smooth(ridge,ridge+300,r));
    shell=std::lerp(shell,connector,Smooth(ridge-160,ridge,r));
    height=shell;
    if(x>=-700&&x<=700&&z>=-700&&z<=500)height=0;
+   JoinHeight(x,z,height);
  }
  return {height,weight,face,1e9,0,0,.65};
 }

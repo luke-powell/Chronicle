@@ -140,6 +140,7 @@ struct Draw3DVisual {
     std::vector<uint32_t>      indices; // kept only for immediate (per-frame) visuals
     bool                       vertex_colour = false;
     bool                       immediate = false;
+    bool                       native_terrain = false;
 };
 
 Draw3DVisual *Draw3DFindVisual(const void *block);

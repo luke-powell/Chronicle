@@ -241,6 +241,10 @@ foreach(kernel terrain_kernel.hpp canyon_kernel.hpp forest_kernel.hpp forest_dis
     file(SHA256 "${kernel_path}" kernel_hash)
     string(APPEND FOREST_KEY_INPUT "${kernel_hash}")
 endforeach()
+set(native_join_path "${CMAKE_SOURCE_DIR}/port/src/town_canyon_join.hpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${native_join_path}")
+file(SHA256 "${native_join_path}" native_join_hash)
+string(APPEND FOREST_KEY_INPUT "${native_join_hash}")
 string(SHA256 FOREST_GENERATOR_HASH "${FOREST_KEY_INPUT}")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/forest_generator_version.hpp"
     "#pragma once\n#define DC_FOREST_GENERATOR_VERSION \"${FOREST_GENERATOR_HASH}\"\n")
@@ -310,6 +314,10 @@ if(ANDROID)
 else()
     add_executable(darkcloud ${PORT_DIR}/main.cpp)
     set_target_properties(darkcloud PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+    # Allow a separately named validation build while the player keeps the
+    # previous Windows executable open (Windows locks running executables).
+    set(DC_EXECUTABLE_NAME "darkcloud" CACHE STRING "Desktop executable filename")
+    set_target_properties(darkcloud PROPERTIES OUTPUT_NAME "${DC_EXECUTABLE_NAME}")
     set(darkcloud_target darkcloud)
 endif()
 dc_link_game(${darkcloud_target})

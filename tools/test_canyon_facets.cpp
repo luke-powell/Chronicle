@@ -16,7 +16,7 @@ int main(){
   int a,b,c;row>>a>>b>>c;auto pa=vertices[a-1],pb=vertices[b-1],pc=vertices[c-1];
   double x=(pa[0]+pb[0]+pc[0])/3,z=(pa[2]+pb[2]+pc[2])/3,y=(pa[1]+pb[1]+pc[1])/3;
   // Native transition and outer LOD stitching deliberately have other shapes.
-  if(std::hypot(x,z)<2400||canyon::At(x,z).weight<1)continue;
+  if(std::max(std::abs(x),std::abs(z))<=2560||canyon::At(x,z).weight<1)continue;
   auto edge=[](double p){double u=p-std::floor(p/512)*512;return u<128||u>384;};
   if(edge(x)||edge(z))continue;
   double error=std::abs(canyon::At(x,z).height-.04-y);worst=std::max(worst,error);
