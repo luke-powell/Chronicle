@@ -1,0 +1,51 @@
+Norune night mob prototype
+
+Uses the native Skeleton Soldier (e03a, HP 23), Dasher (e06a, HP 23)
+and Cave Bat (e60a, HP 12) assets and idle/walk/death animations.
+
+Spawn rules approximate single-player Minecraft hostile surface spawning:
+- Darkness: the existing night phase; active outdoor torches exclude nearby spawns.
+- 48 to 128 metres from Toan, using 10 retail units per metre.
+- Global population cap 14, same-species packs of 1 to 4; four attempts per second.
+  Both cap and attempt rate are 80% below the initial prototype.
+- Dry, resident terrain, outside Georama building footprints; no terrain generation
+  or streaming waits are requested by spawn checks.
+- Immediate despawn beyond 128 metres; outside 32 metres, after 30 seconds,
+  a 1/800 chance per 20 Hz decision tick.
+- Detection within 32 metres with terrain/building line of sight, pursuit until
+  48 metres, steering around steep steps, water and other enemies.
+- Sword strikes use the existing town attack timing and equipped weapon attack.
+- Daylight stops spawning and damages ALL three species by max HP / 8 per second.
+  Integer remainders preserve the fractional damage: full HP reaches zero on the
+  eighth tick. Death animation remains briefly before removal.
+
+This is a continuous-terrain approximation, not a Minecraft engine port: torch
+light is a radius rather than a voxel light field, attempts are globally budgeted,
+and no cave/roof spawning is implemented. Simulation pauses in menus, interiors,
+Georama and Dran flight. Population is transient, not serialized. Loot and weapon XP are not implemented.
+
+Combat: attacks have wind-up, impact-time range/facing/obstruction checks and
+recovery. Sword hits interrupt attacks with retail hit reactions and flashes.
+Death clips finish before the corpse fades. Dedicated dungeon impacts use mixer
+port 9 without replacing town sounds. Toan can guard; damage has 45 ticks of
+invulnerability, HP display and hurt animation. Knockout returns to the arrival
+position with full HP after 150 simulation ticks, with no currency penalty.
+R3 toggles nearest visible target within 32 metres; lock drops on death, loss
+of line of sight or distance beyond 48 metres. Camera and facing track target.
+L3 now calls Dran / lands, replacing the previous R3 binding.
+
+Reference:
+https://learn.microsoft.com/en-us/minecraft/creator/reference/content/spawnrulesreference/examples/spawnrulescomponents/spawn_rules
+
+Validation:
+- tools/test_night_spawn.cpp: pure distance, darkness, torch, water, cap,
+  despawn and fractional sunlight arithmetic boundary tests.
+- python tools/test_town_mobs.py: copied slot 1, native assets, all species,
+  population cap, pursuit, travel despawn, dawn suppression and eight-second death.
+  Offscreen captures and logs are under port/run/mod-tests/integration.
+- python tools/test_town_mob_combat.py: actual HP loss, misses, interrupts,
+  progressing hurt/death animations, R3 input and mixed impact audio.
+- DC_MOBS_TRACE enables lifecycle diagnostics. world.mobs.load/tick/draw scopes
+  participate in the existing opt-in CPU profiler.
+- DC_TEST_MOBS_NIGHT, DC_TEST_MOBS_VIEW, DC_TEST_MOBS_CYCLE and DC_TEST_MOBS_SUN
+  are automated-test controls only. Normal launches must omit them.

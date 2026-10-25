@@ -13,3 +13,5 @@ void TownTerrainCancelWalk();
 
 // Camera/cursor height while surveying from far above; never placement/collision.
 float TownTerrainCursorHeight(float x,float z);
+// Read only resident detailed triangles; never generates terrain or waits.
+bool TownTerrainResidentHeight(double x,double z,float &height,int maxLevel=2);

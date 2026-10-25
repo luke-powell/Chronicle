@@ -194,11 +194,11 @@ bool DranFlightStep(CMainChara *rider) {
     bool allowed = TownTerrainEnabled(pEditGround) && GameMode == ED_MODE_WALK &&
                    !EdMoveCharaInfo.interior && !EdMoveCharaInfo.fishing && !EdMoveCharaInfo.key_lock &&
                    !viewMode && PortEdCheckKeyMode(1);
-    if (Trace() && ((GamePad.GetPadDown() & PAD_R3) != 0 && !GamePad.On(PAD_SELECT))) {
+    if (Trace() && ((GamePad.GetPadDown() & PAD_L3) != 0 && !GamePad.On(PAD_SELECT))) {
         std::fprintf(stderr, "dran: summon allowed=%d grounded=%d combat=%d events=%d/%d\n", allowed, rider->move_info.landed, TownCombatBusy(), EdMoveCharaInfo.event_no, EdMoveCharaInfo.system_event_no);
     }
     if (!active) {
-        if (!allowed || !((GamePad.GetPadDown() & PAD_R3) != 0 && !GamePad.On(PAD_SELECT)) || TownCombatBusy() || !rider->move_info.landed ||
+        if (!allowed || !((GamePad.GetPadDown() & PAD_L3) != 0 && !GamePad.On(PAD_SELECT)) || TownCombatBusy() || !rider->move_info.landed ||
             EdMoveCharaInfo.event_no > 0 || EdMoveCharaInfo.system_event_no > 0) {
             return false;
         }
@@ -223,7 +223,7 @@ bool DranFlightStep(CMainChara *rider) {
         if (Trace()) {
             std::fprintf(stderr, "dran: takeoff\n");
         }
-    } else if (allowed && ((GamePad.GetPadDown() & PAD_R3) != 0 && !GamePad.On(PAD_SELECT))) {
+    } else if (allowed && ((GamePad.GetPadDown() & PAD_L3) != 0 && !GamePad.On(PAD_SELECT))) {
         if (landing) {
             landing = false;
             TownTerrainCancelWalk();
@@ -373,7 +373,7 @@ void DranFlightHUD() {
         labels[slot].Draw(x + 34, y);
     };
     if (!active) {
-        hint(0, glyphs::Button::R3, "Call Dran", 20, 438, "R3");
+        hint(0, glyphs::Button::L3, "Call Dran", 20, 438, "L3");
         return;
     }
     if (messageTicks && !landing) {
@@ -385,7 +385,7 @@ void DranFlightHUD() {
     hint(2, glyphs::Button::R1, "Boost", 420, 416, "R1");
     hint(3, glyphs::Button::Cross, "Climb", 20, 442, "X");
     hint(4, glyphs::Button::Circle, "Descend", 220, 442, "O");
-    hint(5, glyphs::Button::R3, landing ? "Cancel landing" : "Land", 420, 442, "R3");
+    hint(5, glyphs::Button::L3, landing ? "Cancel landing" : "Land", 420, 442, "L3");
 }
 
 void DranFlightSavePosition(world::Position &position, float &heading) {

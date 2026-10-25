@@ -1,4 +1,5 @@
 #include "gfx/capture.hpp"
+#include "town_mobs.hpp"
 #include "dran_flight.hpp"
 #include "world_origin.hpp"
 #include "biome_music.hpp"
@@ -789,6 +790,7 @@ PORT_OVERRIDE int EditLoop() {
     sceVu0FMATRIX view;
     sceVu0FVECTOR eye;
 
+    TownMobsCamera();
     NowCamera->GetCameraMatrix(view);
     NowCamera->GetPos(eye);
     MGSetViewMatrix(view, eye);
@@ -1195,6 +1197,7 @@ PORT_OVERRIDE int EditLoop() {
         end_counter = 0;
     }
 
+    TownMobsTick();
     SndStep();
     sceVu0FVECTOR musicPosition{};
     if (Chara) Chara->GetPosition(musicPosition);
@@ -1212,6 +1215,7 @@ PORT_OVERRIDE int EditLoop() {
     }
 
     DranFlightHUD();
+    TownMobsHUD();
     DebugFont__3.length = 0;
 
     if (GamePad.On(PAD_CIRCLE) != 0) {
@@ -1555,6 +1559,7 @@ void EditMainDraw() {
                 }
 
                 EdDrawCharacter(Chara, detail, 0xA, EdVillager, marks, shadow_on, event);
+                TownMobsDraw();
                 break;
             }
         }

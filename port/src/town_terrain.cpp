@@ -530,18 +530,26 @@ void TownTerrainShutdown(){
     gfx::capture::Flush();
 }
 
-float TownTerrainCursorHeight(float x,float z) {
-    gfx::capture::Scope profile("world.editor.cursor_surface");
-    const double wx=world::X(x),wz=world::Z(z);
+bool TownTerrainResidentHeight(double wx,double wz,float &height,int maxLevel) {
     for(const auto &key:active){const auto &t=key.first;
+        if(t.level>maxLevel)continue;
         if(wx<t.left() || wz<t.top() || wx>=t.left()+t.size() || wz>=t.top()+t.size())continue;
-        auto it=cache.find(key);if(it==cache.end())continue;
+        auto it=cache.find(key);if(it==cache.end() || it->second.dirty)continue;
         constexpr int n=terrain::Resolution;
         double u=(wx-t.left())/t.size()*n,v=(wz-t.top())/t.size()*n;
         int ix=std::clamp(int(u),0,n-1),iz=std::clamp(int(v),0,n-1);u-=ix;v-=iz;
         const auto &h=it->second.chunk.surface;int a=iz*(n+1)+ix,b=a+1,c=a+n+1,d=c+1;
-        return float((u+v<=1?h[a]*(1-u-v)+h[b]*u+h[c]*v:h[b]*(1-v)+h[c]*(1-u)+h[d]*(u+v-1))+.04);
+        height=float((u+v<=1?h[a]*(1-u-v)+h[b]*u+h[c]*v:h[b]*(1-v)+h[c]*(1-u)+h[d]*(u+v-1))+.04);
+        return true;
     }
+    return false;
+}
+
+float TownTerrainCursorHeight(float x,float z) {
+    gfx::capture::Scope profile("world.editor.cursor_surface");
+    const double wx=world::X(x),wz=world::Z(z);
+    float height;
+    if(TownTerrainResidentHeight(wx,wz,height,terrain::MaxLevel))return height;
     // Outside prior coverage, use the cheap broad surface until resident
     // terrain arrives. This is only an aerial camera target, never collision.
     return float(terrain::FlightSurfaceHeight(wx,wz));

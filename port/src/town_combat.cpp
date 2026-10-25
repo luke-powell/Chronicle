@@ -1,4 +1,5 @@
 #include "town_combat.hpp"
+#include "town_mobs.hpp"
 #include "dran_flight.hpp"
 
 #include <cstdio>
@@ -51,7 +52,7 @@ std::vector<unsigned int> motionPack;
 std::vector<unsigned int> weaponPack;
 std::vector<unsigned int> voicePack;
 int weaponItem = -1;
-enum class Action { Idle, Slash1, Slash2, Slash3, Slash4, Slash5, Guard, Charge, ChargedSlash, ChargeApex, ChargeFall, ChargeLandWait, ChargeRecover };
+enum class Action { Idle, Slash1, Slash2, Slash3, Slash4, Slash5, Guard, Charge, ChargedSlash, ChargeApex, ChargeFall, ChargeLandWait, ChargeRecover, Hurt, KnockedOut };
 Action action = Action::Idle;
 int queued;
 int heldFrames;
@@ -154,7 +155,7 @@ bool Prepare(CMainChara *chara) {
         "KEY 820,830,0.3\nKEY 830,838,0.3\nKEY 838,847,0.3\n"
         "KEY 847,857,0.3\nKEY 856,884,0.3\nKEY 216,224,0.3\n"
         "KEY 160,170,0.4\nKEY 180,191,0.4\nKEY 191,192,0.0\n"
-        "KEY 191,196,0.2\nKEY 196,196,0.0\nKEY 196,206,0.4\nMOTION_END\n";
+        "KEY 191,196,0.2\nKEY 196,196,0.0\nKEY 196,206,0.4\nKEY 285,291,0.25\nKEY 460,480,0.3\nMOTION_END\n";
     if (!config || size < sizeof(extension)) return false;
     std::memset(config, ' ', size);
     std::memcpy(config, extension, sizeof(extension) - 1);
@@ -281,6 +282,7 @@ void TownCombatStep(CMainChara *chara) {
         }
     }
     if (!Prepare(chara)) return;
+    TownMobsFaceTarget(chara);
     bool pressed = GamePad.Down(PAD_CROSS) != 0;
     bool held = GamePad.On(PAD_CROSS) != 0;
     bool guard = GamePad.On(PAD_R1) != 0;
@@ -288,7 +290,7 @@ void TownCombatStep(CMainChara *chara) {
     if (IsSlash() && pressed)
         queued = std::min(queued + 1, std::max(0, tuning.comboHits - 1 - MotionIndex()));
     bool attacking = IsSlash() || action == Action::ChargedSlash ||
-                     action == Action::ChargeFall || action == Action::ChargeRecover;
+                     action == Action::ChargeFall || action == Action::ChargeRecover || action == Action::Hurt;
     auto *motion = chara->motion[7];
     int index = MotionIndex();
     if ((IsSlash() || action == Action::ChargeFall) && actionTicks > 0) {
@@ -296,6 +298,7 @@ void TownCombatStep(CMainChara *chara) {
         float at = IsSlash() ? soundFrame[index] : 193.0f;
         if (!soundPlayed && motion->state.time >= at) {
             PlaySwingSound();
+            TownMobsSwordHit(chara);
             soundPlayed = true;
         }
     }
@@ -343,6 +346,16 @@ void TownCombatStep(CMainChara *chara) {
     if (Trace()) std::fprintf(stderr, "town combat: tick motion=%d age=%d time=%.2f x=%.2f y=%.2f z=%.2f\n",
                              1000 + index, actionTicks, motion->state.time, chara->pos[0], chara->pos[1], chara->pos[2]);
     ++actionTicks;
+}
+
+bool TownCombatReceiveHit(int damage, float sourceYaw) {
+    if (!owner || !Allowed() || action == Action::KnockedOut) return false;
+    bool guarded=action==Action::Guard && std::cos(owner->rotation.y-sourceYaw)>.2f;
+    if (guarded) return false;
+    auto *status=SaveData->GetDngStatus();
+    status->SetNextLife(0, s16(std::max(0,int(status->hp[0])-damage)),0);
+    queued=0; StartAction(status->hp[0]>0?Action::Hurt:Action::KnockedOut);
+    return true;
 }
 
 void TownCombatDraw(CCharacter *chara) {

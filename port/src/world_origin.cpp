@@ -2,6 +2,7 @@
 #include "gfx/capture.hpp"
 #endif
 #include "dran_flight.hpp"
+#include "town_mobs.hpp"
 #include "world_origin.hpp"
 
 #include <nlohmann/json.hpp>
@@ -135,6 +136,7 @@ void Assign(float *p, Position v) {
 }
 
 void Reset() {
+    TownMobsReset();
     DranFlightReset();
     originX = originZ = 0;
     positions.clear();
@@ -386,6 +388,7 @@ void Capture() {
 }
 
 void Leave() {
+    TownMobsReset();
     DranFlightReset();
     Capture();
     active = false;
