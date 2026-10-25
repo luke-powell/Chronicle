@@ -1,3 +1,4 @@
+#include "dran_flight.hpp"
 #include "world_origin.hpp"
 
 #include <nlohmann/json.hpp>
@@ -131,6 +132,7 @@ void Assign(float *p, Position v) {
 }
 
 void Reset() {
+    DranFlightReset();
     originX = originZ = 0;
     positions.clear();
     areaOrigins.clear();
@@ -374,6 +376,7 @@ void Capture() {
 }
 
 void Leave() {
+    DranFlightReset();
     Capture();
     active = false;
 }
@@ -383,6 +386,7 @@ void Save(const std::filesystem::path &dir) {
     savedPlayer=nullptr;
     if(active && TownTerrainEnabled(pEditGround) && Chara && GameMode!=ED_MODE_MAP_JUMP) {
         auto p=PositionOf(Chara->pos);float rotation[4]{};Chara->GetRotation(rotation);
+        DranFlightSavePosition(p, rotation[1]);
         savedPlayer={{"town",0},{"x",p.x},{"y",p.y},{"z",p.z},{"yaw",rotation[1]}};
     }
     try {

@@ -1126,10 +1126,17 @@ inline double Height(double x, double z, double spacing = 32) {
 }
 
 // Surface of the actual finest terrain triangles, also used by draped roads.
-inline double SurfaceHeight(double x, double z) {
+inline double SurfaceHeight(double x, double z, double spacing = 32) {
     double sx = std::floor(x / 32) * 32, sz = std::floor(z / 32) * 32, u = (x - sx) / 32, v = (z - sz) / 32;
-    double b = Height(sx + 32, sz), c = Height(sx, sz + 32);
-    return u + v <= 1 ? Height(sx, sz) * (1 - u - v) + b * u + c * v : b * (1 - v) + c * (1 - u) + Height(sx + 32, sz + 32) * (u + v - 1);
+    double b = Height(sx + 32, sz, spacing), c = Height(sx, sz + 32, spacing);
+    return u + v <= 1 ? Height(sx, sz, spacing) * (1 - u - v) + b * u + c * v : b * (1 - v) + c * (1 - u) + Height(sx + 32, sz + 32, spacing) * (u + v - 1);
+}
+
+// River carving only lowers nature; foundations and roads blend monotonically.
+// Skipping carving at the same triangle vertices is therefore an upper bound
+// on walking collision, without generating drainage networks on the game thread.
+inline double FlightSurfaceHeight(double x, double z) {
+    return SurfaceHeight(x, z, 512);
 }
 
 inline double Distance(const Tile &t, double x, double z) {
