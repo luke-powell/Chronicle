@@ -21,7 +21,7 @@ def run(name, frames, script, extra=None, mode="edit:0"):
     screenshot = OUT / f"{name}.png"
     with log.open("w", encoding="utf-8") as stream:
         result = subprocess.run([
-            str(ROOT / "port/build/windows-x64-release/darkcloud.exe"),
+            os.environ.get("DC_TEST_EXE",str(ROOT / "port/build/windows-x64-release/darkcloud.exe")),
             "--data", str(ROOT / "port/run/data"), "--save", str(OUT / f"{name}-save"),
             "--offscreen", "--jump", mode, "--fast-load", "--frames", str(frames),
             "--input", str(inputs), "--screenshot", str(screenshot),
@@ -81,17 +81,20 @@ def combat():
 
 
 def camera():
-    text = run("camera", 590,
+    text = run("camera", 1050,
         "0\n100 r3\n101 cross\n150 cross 128 128 128 0\n270 cross 128 128 128 255\n"
-        "420 cross 128 128 128 0\n470\n480 cross 200 128 255 128\n530 200 128 128 128\n",
-        {"DC_TERRAIN_TEST_SPAWN": "0,0,0"})
+        "420 cross 128 128 128 0\n470\n480 cross 200 128 255 128\n530\n600 128 0 128 128\n",
+        {"DC_TERRAIN_TEST_SPAWN": "0,0,0","DC_TEST_SKIP_TERRAIN_DRAW":"1"})
     rows = re.findall(r"dran: camera yaw=([-\d.]+) pitch=([-\d.]+) distance=([-\d.]+) height=([-\d.]+)", text)
     assert rows, text[-4000:]
     pitches = [float(row[1]) for row in rows]
     assert min(pitches) < -1.55 and max(pitches) > 1.55, pitches
     assert all(abs(float(r[2]) ** 2 + float(r[3]) ** 2 - 276.8122 ** 2) < 1 for r in rows), rows
-    assert abs(float(rows[-1][0])) > .5, "orbit must persist when the stick is released"
-    assert rows[-1][:2] == rows[-2][:2], "released look input must retain its orientation"
+    absolute=re.findall(r"worldyaw=([-\d.]+) tick=(\d+)",text)
+    hover=[float(yaw) for yaw,tick in absolute if 450<=int(tick)<=480]
+    assert len(hover)==2 and abs(hover[0]-hover[1])<.0002,hover
+    assert abs(float(rows[-1][0]))<.02,"moving camera did not recenter"
+    assert .06<float(rows[-1][1])<.28,"vertical auto-follow pulled view too far down"
     banks = re.findall(r"dran: attachment socket=to_c error=[\d.]+ bank=([-\d.]+)", text)
     assert any(abs(float(b)) > .05 for b in banks), banks
 

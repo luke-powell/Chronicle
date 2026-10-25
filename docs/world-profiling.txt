@@ -1,0 +1,102 @@
+World profiling
+===============
+Run from Chronicle:
+  python tools/profile_world.py
+This runs the saved-view, look-away, teleport and boosted-flight workload using
+an isolated copy of the player's save. It retains the streaming test's exit
+status: generating a profile does not turn a rendering failure into a pass.
+
+Outputs in port/run/mod-tests/integration:
+  world-profile.jsonl          raw streamed events (recoverable after interruption)
+  world-profile.trace.json     Perfetto/Chrome trace timeline
+  world-profile.summary.json  machine-readable scope, LOD, counter and flight stats
+  world-profile.summary.txt   ranked exclusive times and GPU draw statistics
+Re-analyze any capture:
+  python tools/analyze_world_profile.py PATH.jsonl
+For manual play, set DC_WORLD_PROFILE to an absolute output JSONL path before
+launching the game; unset it for normal performance measurements.
+
+Scopes cover town simulation, canonical rendering, renderer command processing,
+terrain planning/dispatch, worker dispatch wait, height mesh generation, biome
+materials, canopy, river water, grass, tree population/cache I/O, forest geometry,
+mesh and texture uploads. Scheduler wait, completed-build-to-first-upload wait,
+and requested-to-ready latency are separate wait intervals. Counters expose
+pending tiles, busy workers, uploads waiting, cache size, initial loading and flight.
+Existing Kazarov renderer scopes are mirrored in non-Tracy builds. Tracy builds
+retain their existing renderer macros; explicit world capture scopes still work.
+
+Interpretation:
+- Scope timings are elapsed wall-clock time, not sampled OS CPU cycles. Worker
+  totals overlap across threads; do not add them to get frame time.
+- Exclusive times subtract nested instrumented CPU scopes on the same thread.
+  Blocking inside uninstrumented calls remains attributed to the enclosing scope.
+- Wait/latency intervals are reported separately, never subtracted as CPU children.
+- GPU draw timestamps use existing completed-frame fences: no profiling wait is
+  added. They exclude the separate upload command buffer and are not synchronized
+  to the CPU clock; reported as duration counters, not fabricated CPU-timeline spans.
+- Flight summary starts at the first flight marker; full summary includes startup.
+- Recording events has overhead. Compare normal runs separately before claiming
+  FPS gains; use captures to identify expensive stages and long scheduling gaps.
+- No profiling flag means no file writes, GPU queries or timing reads for scopes.
+
+Population cache keys now hash the generator headers at CMake configuration,
+with automatic reconfiguration when those headers change. Renderer/profiling-only
+rebuilds retain the same populations. The CMake schema version must change when
+the key layout/edit filtering changes. Old timestamp-keyed cache entries are
+ignored and eventually evicted by the existing bounded derived-cache policy.
+
+Measurements and changes (2026-10-24)
+-------------------------------------
+The profiled copied-save traversal now passes the full-resolution-under-player
+assertion throughout boosted flight. Flight terrain update elapsed time:
+median 1.429 ms, p99 10.239 ms, maximum 15.545 ms. These are streaming-update
+measurements, not whole-frame times. GPU draw duration averaged 2.189 ms.
+
+The trace identified redundant seam variants, rebuilding intermediate publication
+states, and disproportionate disk I/O for small nearby populations. Changes:
+- Normalize finer/equal/missing-neighbor keys to the same unstitched geometry.
+- Plan four budget-neutral refinement/coarsening transfers together, then build
+  the resulting seams. Active terrain still has exactly 928 chunks.
+- Keep nearby populations in the shared memory memo; persist only LOD >= 3.
+- Hash generator source content instead of compilation date for persistent keys.
+
+Remaining prominent compute stages are near terrain height/normal sampling,
+grass construction, and cold distant population/canopy generation. The profiler
+is intentionally retained for subsequent optimization. A passing traversal is
+not a guarantee against stalls on every machine or arbitrary teleport distances.
+
+The initial exploratory capture overlapped a build and is not a clean performance
+baseline. Later captures ran without compilation. The warm-cache experiment
+re-keyed only populations from the immediately preceding build with unchanged
+terrain/forest kernels; this is not an automatic migration of user caches.
+
+Final profiling-disabled checks:
+- Copied-save travel: PASS; every sampled flight frame stays LOD 0.
+  Streaming update median 0.952 ms, p99 11.433 ms, max 13.605 ms.
+- Georama zoom out/in: PASS; exactly 928 active tiles, no world rebuild.
+- Fixed-view throughput: 276.85 test ticks/s, one canonical + one interpolated
+  render per tick, at 1280x720. This is an offscreen benchmark, not monitor FPS.
+- Ring geometry invariants: PASS at 240 positions including +/-1e12 coordinates.
+- Profiler analyzer tests: PASS nested scopes, separate threads/waits, interrupted
+  JSONL recovery and trace export.
+- Flight and overhead captures inspected for missing ground/floating canopy sheets.
+
+Editor landing/retarget follow-up (2026-10-25)
+--------------------------------------------
+The zoomed-out cursor generated exact terrain in movement and in two draw passes.
+Using resident triangle samples for the unselected aerial cursor removed those
+queries. A remaining ~120 ms per moving frame came from road drape regeneration:
+floating-origin changes invalidated every road despite unchanged world positions.
+Stable world-coordinate cache keys remove that rebuild without changing draping.
+
+Same copied-save rapid pan/reversal/zoom/landing, profiling disabled:
+- Before road-cache fix: editor CPU tick p99 131.677 ms, max 146.709 ms.
+- After: 850 editor ticks, median 2.938 ms, p99 19.588 ms, max 22.661 ms.
+- 25 initial road builds; zero after the first pan retarget; no terrain edits.
+- Separate flight regression: terrain update median 0.947 ms, p99 9.177 ms,
+  max 12.579 ms; player center remains LOD 0 throughout sustained flight.
+These are CPU tick/update measurements, not end-to-end displayed frame times.
+Cold generation and arbitrary long-distance travel still require asynchronous
+work; the renderer retains coverage while prioritizing the current destination.
+- Final placement regression PASS: a real edit invalidated 65 of 1113 cached
+  chunks, retained horizon/forest coverage and stayed within the upload budget.

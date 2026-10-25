@@ -8,23 +8,23 @@
 #include <queue>
 #include <tuple>
 #include <vector>
+#include "shared_memo.hpp"
 
 // Pure, global-coordinate terrain. No renderer, saves, or game assets required.
 namespace terrain {
 constexpr int    Resolution = 16;
 constexpr double BaseSize = 512;
-// MorrowCraft's default 1,000-mile experiment: 112,640 units per mile.
-constexpr double Radius = 112640000;
+// 112,640 game units per mile; the outer ring guarantees over 2,300 miles.
 constexpr int    MaxLevel = 18;
+constexpr double Radius = BaseSize * (1u << MaxLevel) * 2;
 
-// Water and the supporting near terrain share one tessellation. Narrow channels
-// otherwise disappear beneath the straight chords of a much coarser hillside.
-inline int MeshResolution(int level) {
-    return level<=2 ? Resolution<<level : level==3 ? 64 : level>=8 ? 8 : Resolution;
-}
-inline int MeshSampleLevel(int level) {
-    return level<=2 ? 0 : level==3 ? 1 : level>=8 ? level+1 : level;
-}
+// Every ring doubles the world-space sample spacing, never the mesh budget.
+inline int MeshResolution(int) { return Resolution; }
+inline int MeshSampleLevel(int level) { return level; }
+constexpr int RingWidth = 8;
+constexpr int RingTileCount = RingWidth*RingWidth;
+constexpr int RingBandCount = RingTileCount*3/4;
+constexpr int MaximumSelectedTiles = RingTileCount + MaxLevel*RingBandCount;
 
 
 struct Tile {
@@ -199,6 +199,7 @@ inline MountainForm MountainAt(double x,double z) {
     auto &slot=cache[Mix(std::bit_cast<uint64_t>(x)^Mix(std::bit_cast<uint64_t>(z)))&(cache.size()-1)];
     if(slot.valid&&slot.x==x&&slot.z==z)return slot.form;
     auto result=BaseMountainAt(x,z);
+    double incisionBudget=0;
     double regional=Smooth(3200,16000,std::hypot(x,z))*Smooth(150,1600,result.height);
     if(regional>0) {
         // Orient kilometre-scale drainage with structural relief, excluding
@@ -206,6 +207,12 @@ inline MountainForm MountainAt(double x,double z) {
         double gx=(BaseMountainAt(x+256,z).erosionBase-BaseMountainAt(x-256,z).erosionBase)/512;
         double gz=(BaseMountainAt(x,z+256).erosionBase-BaseMountainAt(x,z-256).erosionBase)/512;
         double slope=std::hypot(gx,gz);
+        // Limit incision to locally available relief. Slope alone otherwise
+        // excavates both walls below a comparatively untouched valley floor.
+        double localFloor=result.height;
+        for(auto offset:std::array<std::array<double,2>,4>{{{1024,0},{-1024,0},{0,1024},{0,-1024}}})
+            localFloor=std::min(localFloor,BaseMountainAt(x+offset[0],z+offset[1]).height);
+        incisionBudget=.35*std::max(0.,result.height-localFloor);
         double size=18000,amplitude=regional*(90*Smooth(.025,.18,slope)+4000*Smooth(.25,.85,slope));
         for(int octave=0;octave<4;++octave) {
             double slope=std::hypot(gx,gz),px=-gz/std::max(slope,.001),pz=gx/std::max(slope,.001);
@@ -233,6 +240,10 @@ inline MountainForm MountainAt(double x,double z) {
             size*=.45;amplitude*=.35;
         }
     }
+    double incision=BaseMountainAt(x,z).height-result.height;
+    // Smooth saturation retains small gullies without a hard clipping seam.
+    if(incision>0)result.height=BaseMountainAt(x,z).height-
+        incisionBudget*std::tanh(incision/std::max(incisionBudget,1e-9));
     slot={x,z,result,true};return result;
 }
 struct Weathering { double displacement=0, bedrock=0, talus=0; };
@@ -435,7 +446,23 @@ inline double VegetationDensity(double x, double z, const Climate &c, double foo
 inline double UnderstoryDensity(double x,double z,const Climate &c) {
     double patch=Smooth(-.05,.45,ClimateNoise(x/320+18,z/320-73));
     auto weathered=WeatheringAt(x,z);
-    return c.land*(1-c.snow)*(1-Smooth(.12,.55,c.sand))*(.04+.5*c.forest)*patch*(1-std::max(weathered.bedrock,weathered.talus*.8));
+    return c.land*(1-c.snow)*(1-Smooth(.12,.55,c.sand))*(.35+.45*c.forest)*(.25+.75*patch)*(1-std::max(weathered.bedrock,weathered.talus*.8));
+}
+
+// Climate-independent upper envelope of VegetationDensity. Forest fraction,
+// desert blending, land and snow only reduce this bound. Rejecting a candidate
+// above it avoids exact terrain/drainage queries without losing a single tree.
+inline double VegetationDensityBound(double x,double z){
+    double wx=x+1300*ClimateNoise(x/12000+52,z/12000-8);
+    double wz=z+1300*ClimateNoise(x/12000-12,z/12000+37);
+    double stand=Smooth(-.25,.35,ClimateNoise(wx/17000+11,wz/17000-32));
+    double meadow=Smooth(.05,.48,ClimateNoise(wx/6300-51,wz/6300+8));
+    double gap=Smooth(.08,.50,ClimateNoise(wx/750+73,wz/750-12));
+    double woodland=(.2+.8*stand)*(1-.98*meadow)*(1-.92*gap);
+    double copses=.035*Smooth(.2,.6,ClimateNoise(wx/2200+21,wz/2200+33));
+    double dry=.005+.019*Smooth(-.1,.5,ClimateNoise(wx/2600-15,wz/2600+42));
+    auto weathered=WeatheringAt(x,z);
+    return std::max({woodland,copses,dry})*(1-.95*std::max(weathered.bedrock,weathered.talus*.65));
 }
 
 inline std::array<double, 4> SpeciesWeights(const Climate &c) {
@@ -735,11 +762,7 @@ struct DrainRoute {
     std::vector<DrainNode> points;
 };
 
-inline const DrainRoute &DrainRouteAt(DrainKey key) {
-    static thread_local std::map<DrainKey, DrainRoute> cache;
-    if (auto it = cache.find(key); it != cache.end()) {
-        return it->second;
-    }
+inline DrainRoute ComputeDrainRoute(DrainKey key) {
     auto                                     a = DrainPoint(key.first, key.second);
     std::vector<std::pair<double, DrainKey>> candidates;
     for (int dz = -1; dz <= 1; ++dz) {
@@ -800,10 +823,16 @@ inline const DrainRoute &DrainRouteAt(DrainKey key) {
             }
         }
     }
-    if (cache.size() > 32768) {
-        cache.clear();
-    }
-    return cache.emplace(key, std::move(route)).first->second;
+    return route;
+}
+
+inline const DrainRoute &DrainRouteAt(DrainKey key) {
+    static SharedMemo<DrainKey,DrainRoute,65536> shared;
+    static thread_local std::map<DrainKey,DrainRoute> local;
+    if(auto it=local.find(key);it!=local.end())return it->second;
+    auto route=shared.Get(key,[&]{return ComputeDrainRoute(key);});
+    if(local.size()>8192)local.clear();
+    return local.emplace(key,std::move(route)).first->second;
 }
 
 inline DrainKey Downstream(DrainKey key) { return DrainRouteAt(key).destination; }
@@ -843,12 +872,13 @@ inline double Runoff(DrainKey key, int depth = 12) {
     if (auto it = cache.find(id); it != cache.end()) {
         return it->second;
     }
-    double total = rain;
-    // Copy keys: recursion can evict the bounded topology cache.
-    auto incoming = Tributaries(key);
-    for (auto from : incoming) {
-        total += Runoff(from, depth - 1);
-    }
+    static SharedMemo<std::tuple<int64_t,int64_t,int>,double,131072> shared;
+    double total=shared.Get(id,[&]{
+        double total=rain;
+        auto incoming=Tributaries(key);
+        for(auto from:incoming)total+=Runoff(from,depth-1);
+        return total;
+    });
     if (cache.size() > 131072) {
         cache.clear();
     }
@@ -880,13 +910,8 @@ struct RiverReach {
     double                 minX, maxX, minZ, maxZ;
 };
 
-inline const RiverReach &DrainReach(int64_t x, int64_t z) {
-    // Cache topology, never local coordinates: rebasing and LOD cannot change rivers.
-    static thread_local std::map<std::pair<int64_t, int64_t>, RiverReach> cache;
-    auto                                                                  key = std::pair{x, z};
-    if (auto it = cache.find(key); it != cache.end()) {
-        return it->second;
-    }
+inline RiverReach ComputeDrainReach(int64_t x,int64_t z) {
+    DrainKey key{x,z};
     auto       a = DrainPoint(x, z);
     auto       destination = Downstream(key);
     auto       b = DrainPoint(destination.first, destination.second);
@@ -947,10 +972,17 @@ inline const RiverReach &DrainReach(int64_t x, int64_t z) {
         reach.minZ = std::min(reach.minZ, p.z);
         reach.maxZ = std::max(reach.maxZ, p.z);
     }
-    if (cache.size() > 32768) {
-        cache.clear();
-    }
-    return cache.emplace(key, reach).first->second;
+    return reach;
+}
+
+inline const RiverReach &DrainReach(int64_t x,int64_t z) {
+    static SharedMemo<DrainKey,RiverReach,16384> shared;
+    static thread_local std::map<DrainKey,RiverReach> local;
+    DrainKey key{x,z};
+    if(auto it=local.find(key);it!=local.end())return it->second;
+    auto reach=shared.Get(key,[&]{return ComputeDrainReach(x,z);});
+    if(local.size()>4096)local.clear();
+    return local.emplace(key,std::move(reach)).first->second;
 }
 
 struct RiverSample {
@@ -969,6 +1001,18 @@ inline const std::vector<DrainKey> &RiverCandidates(int64_t cx, int64_t cz) {
     double                x = cx * 2048., z = cz * 2048.;
     for (int dz = -6; dz <= 6; ++dz) {
         for (int dx = -6; dx <= 6; ++dx) {
+            // Reject impossible intersections before recursively accumulating
+            // twelve generations of tributaries. Routed points bound the path;
+            // the optional Hermite curve stays in its Bezier control hull,
+            // whose tangent handles extend at most chordLength/3. Smoothing
+            // is convex and cannot expand that bound. Width never exceeds 420.
+            const auto &route=DrainRouteAt({cx+dx,cz+dz});
+            const auto &a=route.points.front(),&b=route.points.back();
+            double handle=std::hypot(b.x-a.x,b.z-a.z)/3;
+            double minX=std::min(a.x,b.x)-handle,maxX=std::max(a.x,b.x)+handle;
+            double minZ=std::min(a.z,b.z)-handle,maxZ=std::max(a.z,b.z)+handle;
+            for(auto &p:route.points){minX=std::min(minX,p.x);maxX=std::max(maxX,p.x);minZ=std::min(minZ,p.z);maxZ=std::max(maxZ,p.z);}
+            if(x+2048<minX-1420||x>maxX+1420||z+2048<minZ-1420||z>maxZ+1420)continue;
             const auto &r = DrainReach(cx + dx, cz + dz);
             double      margin = r.lake ? 1300 : std::max(r.width, r.endWidth) + 1000;
             if (r.width > 0 && x + 2048 >= r.minX - margin && x <= r.maxX + margin && z + 2048 >= r.minZ - margin && z <= r.maxZ + margin) {
@@ -1144,33 +1188,26 @@ inline double Distance(const Tile &t, double x, double z) {
                       std::max({t.top() - z, 0.0, z - t.top() - t.size()}));
 }
 
-inline void SelectNode(std::vector<Tile> &out, Tile t, double x, double z, int minimumLevel = 0) {
-    double distance = Distance(t, x, z);
-    if (distance > Radius) {
-        return;
-    }
-    // Keep river-scale relief resolved throughout the nearby walking landscape.
-    // Otherwise a broad terrain triangle can bridge over the independently drawn water.
-    bool riverDetail = minimumLevel <= 1 && t.level > 1 && distance < 8000;
-    if (t.level > minimumLevel && (distance < t.size() * 2.5 || riverDetail)) {
-        for (int dz = 0; dz < 2; dz++) {
-            for (int dx = 0; dx < 2; dx++) {
-                SelectNode(out, {t.x * 2 + dx, t.z * 2 + dz, t.level - 1}, x, z, minimumLevel);
-            }
-        }
-    } else {
-        out.push_back(t);
-    }
-}
-
+// Nested square rings, snapped to pairs of tiles so the previous ring's
+// boundary always lies on the next ring's grid. Each ring is 8x8 minus a
+// 4x4 hole: exactly 48 tiles; the innermost ring has 64. No view direction,
+// camera height or terrain noise participates in residency.
 inline std::vector<Tile> Select(double x, double z, int minimumLevel = 0) {
+    minimumLevel=std::clamp(minimumLevel,0,MaxLevel);
     std::vector<Tile> out;
-    double            size = std::ldexp(BaseSize, MaxLevel);
-    int64_t           cx = int64_t(std::floor(x / size)), cz = int64_t(std::floor(z / size));
-    for (int dz = -1; dz <= 1; dz++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            SelectNode(out, {cx + dx, cz + dz, MaxLevel}, x, z, minimumLevel);
+    out.reserve(RingTileCount+(MaxLevel-minimumLevel)*RingBandCount);
+    int64_t previousX=0,previousZ=0;
+    for(int level=minimumLevel;level<=MaxLevel;++level) {
+        double size=std::ldexp(BaseSize,level);
+        int64_t left=int64_t(std::floor(x/(2*size)))*2-RingWidth/2;
+        int64_t top=int64_t(std::floor(z/(2*size)))*2-RingWidth/2;
+        for(int dz=0;dz<RingWidth;++dz)for(int dx=0;dx<RingWidth;++dx){
+            int64_t tx=left+dx,tz=top+dz;
+            if(level>minimumLevel && tx>=previousX/2 && tx<(previousX+RingWidth)/2 &&
+                tz>=previousZ/2 && tz<(previousZ+RingWidth)/2)continue;
+            out.push_back({tx,tz,level});
         }
+        previousX=left;previousZ=top;
     }
     return out;
 }

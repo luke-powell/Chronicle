@@ -25,12 +25,15 @@ int main() {
             }
             assert(found);
         }
-        auto                             all = forest::Generate(origin.first, origin.second, 2048);
+        auto all = forest::Generate<false>(origin.first, origin.second, 2048);
+        auto cached=forest::GenerateCached(origin.first,origin.second,2048);
+        std::map<uint64_t,forest::Tree> cachedById;for(auto t:cached)assert(cachedById.emplace(t.id,t).second);
+        assert(cached.size()==all.size());for(auto t:all){auto c=cachedById.at(t.id);assert(t.x==c.x&&t.y==c.y&&t.z==c.z&&t.yaw==c.yaw&&t.scale==c.scale&&t.species==c.species);}
         assert(!all.empty());
         std::map<uint64_t, forest::Tree> split;
         for (int z = 0; z < 4; z++) {
             for (int x = 0; x < 4; x++) {
-                for (auto t : forest::Generate(origin.first + x * 512, origin.second + z * 512, 512)) {
+                for (auto t : forest::GenerateCached(origin.first + x * 512, origin.second + z * 512, 512)) {
                     assert(split.emplace(t.id, t).second);
                 }
             }

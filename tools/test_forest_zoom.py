@@ -8,7 +8,7 @@ for name, extra in [('lod-final-430',{}),('lod-negative-430',{'DC_DISABLE_FOREST
             {'DC_TERRAIN_TEST_SPAWN':'16050,0,0','DC_FOREST_TRACE':'1',**extra})
     rows=re.findall(r'terrain forest ready: (-?\d+) (-?\d+) level (\d+) trees (\d+) ids (\d+) mask (\d+)',log)
     assert {4,5}.issubset({int(r[2]) for r in rows})
-    assert all(int(r[5])==(7 if int(r[2])<=2 else 4) for r in rows)
+    assert all(int(r[5])==((1 << int(r[2])) if int(r[2])<=2 else 4) for r in rows)
 a=Image.open(OUT/'lod-final-430.png').convert('RGB').crop((0,150,1280,580))
 b=Image.open(OUT/'lod-negative-430.png').convert('RGB').crop((0,150,1280,580))
 difference=ImageStat.Stat(ImageChops.difference(a,b)).mean

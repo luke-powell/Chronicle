@@ -1,3 +1,6 @@
+#ifdef PORT
+#include "gfx/capture.hpp"
+#endif
 #include "dran_flight.hpp"
 #include "world_origin.hpp"
 
@@ -208,8 +211,12 @@ void Rebase(double nx, double nz) {
     }
     for (int i = 0; i < EdMoveCharaInfo.point_count; i++) {
         auto &p = EdMoveCharaInfo.points[i];
-        if (!p.map_object) {
+        // Plot-linked events store building-local coordinates even though
+        // map_object is null: EdGetEvent resolves parts_no at query time.
+        // Only unowned event points live directly in world coordinates.
+        if (!p.map_object && p.parts_no < 0) {
             Shift(p.position, nx, nz);
+            Shift(p.extent, nx, nz);
         }
     }
     Shift(EdMoveCharaInfo.param.position, nx, nz);
@@ -235,6 +242,9 @@ void Rebase(double nx, double nz) {
 }
 
 void BeginTick() {
+#ifdef PORT
+    gfx::capture::Scope profile("world.origin.begin_tick");
+#endif
     if (!active || !TownTerrainEnabled(pEditGround)) {
         return;
     }
@@ -419,9 +429,23 @@ void TestTick() {
             }
         }
         auto   player = PositionOf(Chara->pos);
+        struct LocalEvent {int index;std::array<float,4> position,extent;};
+        std::vector<LocalEvent> localEvents;
+        for(int i=0;i<EdMoveCharaInfo.point_count;++i){
+            auto &p=EdMoveCharaInfo.points[i];
+            if(p.parts_no>=0 || p.map_object){
+                LocalEvent e{i};std::copy_n(p.position,4,e.position.begin());
+                std::copy_n(p.extent,4,e.extent.begin());localEvents.push_back(e);
+            }
+        }
         double x = originX, z = originZ;
         for (int i = 0; i < 20; i++) {
             Rebase(x + 100000000, z - 100000000);
+            for(auto &e:localEvents){
+                auto &p=EdMoveCharaInfo.points[e.index];
+                if(!std::equal(e.position.begin(),e.position.end(),p.position) ||
+                   !std::equal(e.extent.begin(),e.extent.end(),p.extent))std::abort();
+            }
             Rebase(x, z);
         }
         size_t i = 0;
@@ -438,7 +462,7 @@ void TestTick() {
         if (after.x != player.x || after.y != player.y || after.z != player.z) {
             std::abort();
         }
-        std::fprintf(stderr, "world test: 40 origin shifts preserve exact double positions\n");
+        std::fprintf(stderr, "world test: 40 origin shifts preserve exact double positions and building-local interactions\n");
     }
     if (std::getenv("DC_WORLD_RELOAD_TEST")) {
         CMemoryCardAccess card;

@@ -265,10 +265,11 @@ bool TownCombatBeforeMove(CMainChara *chara) {
 
 void TownCombatStep(CMainChara *chara) {
     visible = false;
-    // Actual interactions interrupt; merely being near an event doesn't end an
-    // attack already underway. Landing/falling bits are not control locks.
+    // Retail interaction detection runs before this hook. A door, chest,
+    // ladder or conversation owns Cross even during an existing combo.
     if (!Allowed() ||
-        EdMoveCharaInfo.event_no > 0 || EdMoveCharaInfo.system_event_no > 0) {
+        EdMoveCharaInfo.event_no > 0 || EdMoveCharaInfo.system_event_no > 0 ||
+        EdMoveCharaInfo.acted || EdMoveCharaInfo.event_ready) {
         CancelAction();
         return;
     }
@@ -279,7 +280,6 @@ void TownCombatStep(CMainChara *chara) {
             jumping = false;
         }
     }
-    if (action == Action::Idle && (EdMoveCharaInfo.acted || EdMoveCharaInfo.event_ready)) return;
     if (!Prepare(chara)) return;
     bool pressed = GamePad.Down(PAD_CROSS) != 0;
     bool held = GamePad.On(PAD_CROSS) != 0;

@@ -1,3 +1,4 @@
+#include "gfx/capture.hpp"
 #include "gameloop.hpp"
 
 #include <algorithm>
@@ -786,6 +787,7 @@ void GameSetPresentSettings(const GamePresentSettings &settings) {
 }
 
 void GameRenderTick(gfx::DisplayListRef list) {
+    gfx::capture::Scope renderProfile("renderer.canonical_frame_cpu");
     PresentClock::time_point start = PresentClock::now();
     gfx::RenderList(*list, 1.0f, {.canonical = true});
     g_stats.canonical_seconds += SecondsSince(start);
@@ -1099,6 +1101,15 @@ int RunGame(int argc, char **argv) {
             GamePad.Step();
             MGEndFrame();
             ++g_frames;
+            if(const char *captures=std::getenv("DC_TEST_CAPTURE_FRAMES")){
+                const char *next=captures;
+                while(*next){char *end=nullptr;auto frame=std::strtoll(next,&end,10);if(end==next)break;
+                    if(frame==g_frames){std::vector<uint8_t> pixels;uint32_t w=0,h=0;
+                        if(GameScreenshot(pixels,w,h))gfx::WritePng(PathsSaveRoot()/std::format("frame-{}.png",g_frames),pixels.data(),w,h);
+                    }
+                    next=*end==','?end+1:end;
+                }
+            }
             PresenceTick();
 
             GameCheckDebugToggle();

@@ -1,3 +1,6 @@
+#ifdef PORT
+#include "gfx/capture.hpp"
+#endif
 #include "world_origin.hpp"
 #include "world_georama.hpp"
 
@@ -143,9 +146,15 @@ void WorldGeoramaLoaded(CSaveData *save, CEditGround *ground) {
 }
 
 void WorldGeoramaDrawRoad(const Draw3DVisual &source, const float model[4][4], const RenderInfo &info, int program) {
-    auto height = [&](double x,double z){return world::SurfaceHeight(double(model[3][0])+x,double(model[3][2])+z);};
-    // Cache per placed instance, never mutate the shared retail road template.
-    using Key = std::tuple<gfx::MeshHandle, float, float, float, float>;
+    gfx::capture::Scope profile("world.georama.road_drape");
+    auto *owner=WorldGeoramaDrawingRoad;
+    auto global=owner?world::PositionOf(owner->pos):world::Position{world::X(model[3][0]),0,world::Z(model[3][2])};
+    const double wx=global.x+(owner?double(model[3][0])-owner->pos[0]:0);
+    const double wz=global.z+(owner?double(model[3][2])-owner->pos[2]:0);
+    auto height = [&](double x,double z){return terrain::SurfaceHeight(wx+x,wz+z);};
+    // Meshes are object-relative. Origin shifts only change their draw matrix,
+    // not their drape or stable instance identity.
+    using Key = std::tuple<gfx::MeshHandle, uintptr_t, double, double, float, float>;
     static std::map<Key, Draw3DVisual> cache;
     static unsigned                    revision = ~0u;
     if (revision != foundationRevision) {
@@ -155,10 +164,12 @@ void WorldGeoramaDrawRoad(const Draw3DVisual &source, const float model[4][4], c
         cache.clear();
         revision = foundationRevision;
     }
-    Key key{source.mesh, model[3][0], model[3][2], model[0][0], model[0][2]};
+    Key key{source.mesh,reinterpret_cast<uintptr_t>(owner),global.x,global.z,model[0][0],model[0][2]};
     auto [it, inserted] = cache.try_emplace(key);
     auto &out = it->second;
     if (inserted) {
+        gfx::capture::Scope buildProfile("world.georama.road_build");
+        if(std::getenv("DC_TERRAIN_TRACE"))std::fprintf(stderr,"road cache: build %.3f %.3f revision %u\n",global.x,global.z,foundationRevision);
         out.vertex_colour = source.vertex_colour;
         for (auto strip : source.strips) {
             unsigned end = strip.first_index + strip.index_count, begin = strip.first_index;
@@ -298,6 +309,9 @@ bool WorldGeoramaOutside(CEditGround *ground, float x, float z) {
 }
 
 float WorldGeoramaHeight(float x, float z) {
+#ifdef PORT
+    gfx::capture::Scope profile("world.editor.exact_height");
+#endif
     float h = float(world::SurfaceHeight(x, z));
     if (TownTerrainEnabled(pEditGround)) {
         for (auto &p : pEditGround->parts) {
@@ -575,10 +589,6 @@ void WorldGeoramaUnlock(CSaveData *save, CEditGround *ground) {
 }
 
 bool WorldGeoramaFoundations(CEditGround *ground) {
-    static double roadOriginX=0,roadOriginZ=0;
-    if(roadOriginX!=world::originX || roadOriginZ!=world::originZ) {
-        roadOriginX=world::originX;roadOriginZ=world::originZ;++foundationRevision;
-    }
     std::vector<terrain::Foundation> next;
     std::vector<CMapParts *>         roadParts;
     for (auto &p : ground->parts) {
@@ -589,7 +599,8 @@ bool WorldGeoramaFoundations(CEditGround *ground) {
     static std::vector<std::pair<double, double>> lastRoads;
     std::vector<std::pair<double, double>>        roadPositions;
     for (auto *p : roadParts) {
-        roadPositions.emplace_back(world::X(p->pos[0]), world::Z(p->pos[2]));
+        auto global=world::PositionOf(p->pos);
+        roadPositions.emplace_back(global.x,global.z);
     }
     for (int i = 0; i < 128; i++) {
         auto &p = ground->parts[i];
@@ -628,20 +639,19 @@ bool WorldGeoramaFoundations(CEditGround *ground) {
         std::vector<bool>             anchors(roadParts.size());
         std::vector<std::vector<int>> neighbors(roadParts.size());
         for (size_t i = 0; i < roadParts.size(); i++) {
-            auto  *p = roadParts[i];
             double sum = 0;
             int    hits = 0;
             for (auto &f : terrain::Foundations()) {
-                double d = std::hypot(std::max(0.0, std::abs(world::X(p->pos[0]) - f.x) - f.halfX), std::max(0.0, std::abs(world::Z(p->pos[2]) - f.z) - f.halfZ));
+                double d = std::hypot(std::max(0.0, std::abs(roadPositions[i].first - f.x) - f.halfX), std::max(0.0, std::abs(roadPositions[i].second - f.z) - f.halfZ));
                 if (d <= 55) {
                     sum += f.height;
                     ++hits;
                 }
             }
             anchors[i] = hits > 0;
-            heights[i] = hits ? sum / hits : world::NaturalHeight(p->pos[0], p->pos[2]);
+            heights[i] = hits ? sum / hits : terrain::NaturalHeight(roadPositions[i].first,roadPositions[i].second);
             for (size_t j = 0; j < roadParts.size(); j++) {
-                if (i != j && std::abs(std::hypot(p->pos[0] - roadParts[j]->pos[0], p->pos[2] - roadParts[j]->pos[2]) - 100) < 1) {
+                if (i != j && std::abs(std::hypot(roadPositions[i].first-roadPositions[j].first,roadPositions[i].second-roadPositions[j].second) - 100) < 1) {
                     neighbors[i].push_back(int(j));
                 }
             }
@@ -666,20 +676,20 @@ bool WorldGeoramaFoundations(CEditGround *ground) {
             }
         }
         for (size_t i = 0; i < roadParts.size(); i++) {
-            auto *p = roadParts[i];
             if (neighbors[i].empty()) {
-                terrain::Roads().push_back({world::X(p->pos[0]), world::Z(p->pos[2]), world::X(p->pos[0]), world::Z(p->pos[2]), heights[i], heights[i]});
+                terrain::Roads().push_back({roadPositions[i].first, roadPositions[i].second, roadPositions[i].first, roadPositions[i].second, heights[i], heights[i]});
             }
             for (int j : neighbors[i]) {
                 if (j > int(i)) {
-                    terrain::Roads().push_back({world::X(p->pos[0]), world::Z(p->pos[2]), world::X(roadParts[j]->pos[0]), world::Z(roadParts[j]->pos[2]), heights[i], heights[j]});
+                    terrain::Roads().push_back({roadPositions[i].first, roadPositions[i].second, roadPositions[j].first, roadPositions[j].second, heights[i], heights[j]});
                 }
             }
         }
     }
     for (auto &p : ground->parts) {
         if (p.handle >= 0 && p.area == -1 && p.subtype == MAP_PARTS_SUBTYPE_ROAD) {
-            p.SetPosition(p.pos[0], float(world::Height(p.pos[0], p.pos[2])), p.pos[2]);
+            auto global=world::PositionOf(p.pos);
+            p.SetPosition(p.pos[0],float(terrain::Height(global.x,global.z)),p.pos[2]);
         }
     }
     for (auto &p : ground->parts) {

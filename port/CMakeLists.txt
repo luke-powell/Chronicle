@@ -232,7 +232,20 @@ file(CONFIGURE OUTPUT ${SHADER_HEADER_DIR}/options/credits.hpp
     CONTENT "#pragma once\ninline constexpr const char *kCredits[] = {${credit_names}};\n")
 
 kz_port_sce_sources(DC_SCE_SOURCES LIBS libvu0 libpad libmc sifdev sifrpc eekernel libcdvd libgraph libdma libpkt)
+# Population caches follow generator content, not compiler timestamps. Renderer
+# and instrumentation edits must not regenerate continental forests.
+set(FOREST_KEY_INPUT "population-cache-v1")
+foreach(kernel terrain_kernel.hpp forest_kernel.hpp forest_disk_cache.hpp)
+    set(kernel_path "${CMAKE_SOURCE_DIR}/port/include/${kernel}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${kernel_path}")
+    file(SHA256 "${kernel_path}" kernel_hash)
+    string(APPEND FOREST_KEY_INPUT "${kernel_hash}")
+endforeach()
+string(SHA256 FOREST_GENERATOR_HASH "${FOREST_KEY_INPUT}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/forest_generator_version.hpp"
+    "#pragma once\n#define DC_FOREST_GENERATOR_VERSION \"${FOREST_GENERATOR_HASH}\"\n")
 add_library(dc_port OBJECT ${PORT_LIB_SOURCES} ${DC_SCE_SOURCES})
+target_include_directories(dc_port PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 if(NINTENDO_SWITCH)
     dc_switch_port(dc_port)
 endif()

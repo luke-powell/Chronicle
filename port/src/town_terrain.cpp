@@ -2,6 +2,7 @@
 #include "dran_flight.hpp"
 #include "town_terrain.hpp"
 #include "town_biomes.hpp"
+#include "gfx/capture.hpp"
 
 #include <array>
 #include <chrono>
@@ -31,12 +32,15 @@
 #include "platform/paths.hpp"
 #include "renderinfo.hpp"
 #include "terrain_kernel.hpp"
+#include "terrain_publication.hpp"
 #include "texture.hpp"
 #include "visualvu1.hpp"
 #include "world_georama.hpp"
 
 namespace {
 struct Chunk {
+    double profileBuilt=0,profileReady=0;
+    std::array<float,(terrain::Resolution+1)*(terrain::Resolution+1)> surface{};
     gfx::MeshHandle    mesh = 0;
     gfx::MeshHandle    snow = 0;
     std::array<int, 4> edges{};
@@ -57,6 +61,10 @@ struct CachedChunk {
 
 std::map<MeshKey, CachedChunk> cache;
 std::vector<MeshKey>           active, pending;
+std::vector<MeshKey>           localPending;
+std::map<MeshKey,double> profileRequests;
+double localPlanX=0,localPlanZ=0;
+std::vector<terrain::Publication<MeshKey>> publications;
 size_t                         pendingCursor = 0;
 unsigned                       cacheClock = 0;
 double                         lastX = 1e30, lastZ = 1e30;
@@ -66,9 +74,8 @@ unsigned terrainRevision=0;
 std::vector<terrain::Foundation> previousFoundations;
 std::vector<terrain::Road> previousRoads;
 
-// During streaming, one persistent CPU worker retains hydrology caches. GPU
-// allocations and publication stay on the render thread. Only one job is in
-// flight: rapid editor movement cannot accumulate an unbounded work queue.
+// Persistent bounded workers retain their numerical caches during all travel.
+// GPU uploads and coverage publication remain on the render thread.
 class TerrainWorker {
     std::mutex mutex;
     std::condition_variable wake;
@@ -87,11 +94,17 @@ public:
     ~TerrainWorker(){ {std::lock_guard lock(mutex);stopping=true;} wake.notify_one();thread.join(); }
     std::future<Chunk> Submit(MeshKey key);
 };
-TerrainWorker &Worker(){static TerrainWorker worker;return worker;}
-std::future<Chunk> building;
-MeshKey buildingKey;
-unsigned buildingRevision=0;
-std::optional<Chunk> uploading;
+constexpr size_t WorkerCapacity=8;
+struct Flight {
+    std::unique_ptr<TerrainWorker> worker;
+    std::future<Chunk> building;
+    std::optional<Chunk> uploading;
+    MeshKey key;
+    unsigned revision=0;
+};
+std::array<Flight,WorkerCapacity> flights;
+size_t WorkerCount(){return std::clamp(size_t(std::thread::hardware_concurrency()/2),size_t(1),WorkerCapacity);}
+double walkX=0,walkZ=0;
 
 void Destroy(Chunk &c) {
     gfx::DestroyMesh(c.mesh);gfx::DestroyMesh(c.snow);BiomeDestroy(c.biome);
@@ -109,15 +122,21 @@ bool Upload(Chunk &c, std::chrono::steady_clock::time_point deadline=std::chrono
 
 void ClearChunks() {
     ++terrainRevision;
-    if(uploading){Destroy(*uploading);uploading.reset();}
+    for(auto &f:flights){
+        // CPU jobs own their input snapshot. Let stale results finish in the
+        // background instead of blocking a door/map transition on a far forest.
+        if(f.uploading){Destroy(*f.uploading);f.uploading.reset();}
+    }
     for (auto &[key, value] : cache) {
         gfx::DestroyMesh(value.chunk.mesh);
         gfx::DestroyMesh(value.chunk.snow);
         BiomeDestroy(value.chunk.biome);
     }
-    cache.clear();
+    cache.clear();profileRequests.clear();
     active.clear();
     pending.clear();
+    publications.clear();
+    localPending.clear();
     pendingCursor = 0;
     lastX = lastZ = 1e30;
     lastLevel = -1;
@@ -139,11 +158,19 @@ void Prepare(CEditGround *ground) {
 
 std::array<int, 4> Edges(const terrain::Tile &t, const terrain::Selection &s) {
     double x = t.left(), z = t.top(), w = t.size();
-    return {terrain::LevelAt(s, x - 1, z + w / 2), terrain::LevelAt(s, x + w + 1, z + w / 2),
+    std::array<int,4> edges={terrain::LevelAt(s, x - 1, z + w / 2), terrain::LevelAt(s, x + w + 1, z + w / 2),
             terrain::LevelAt(s, x + w / 2, z - 1), terrain::LevelAt(s, x + w / 2, z + w + 1)};
+    // Build only stitches to coarser neighbors. Missing, equal, and finer
+    // neighbors all generate identical geometry; share that cache entry.
+    for(auto &level:edges)if(level<=t.level)level=t.level;
+    return edges;
 }
 
 Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
+    gfx::capture::TileScope profileTile(t.x,t.z,t.level);
+    gfx::capture::Scope jobProfile("world.build.total");
+    gfx::capture::Scope terrainProfile("world.build.height_mesh");
+    auto started=std::chrono::steady_clock::now();
     const int n=terrain::MeshResolution(t.level);
     std::vector<gfx::Vertex3D> vertices;
     std::vector<uint32_t>      indices;
@@ -205,16 +232,26 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
     }
     Chunk result;
     result.edges=edges;result.low=low;result.high=std::max(high+1000,float(terrain::SeaLevel+20));
+    terrainProfile.End();
+    auto terrainDone=std::chrono::steady_clock::now();
     if(!std::getenv("DC_TERRAIN_DIAGNOSTIC"))result.biome=BiomeBuild(t,vertices,indices);
+    if(std::getenv("DC_TERRAIN_BUILD_PROFILE"))std::fprintf(stderr,"terrain build: level %d terrain %.3f biome %.3f\n",t.level,
+        std::chrono::duration<double,std::milli>(terrainDone-started).count(),
+        std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-terrainDone).count());
     result.indexCount=unsigned(indices.size());
+    for(size_t i=0;i<vertices.size();++i)result.surface[i]=vertices[i].position[1];
     result.vertices=std::move(vertices);result.indices=std::move(indices);
     if(hasSnow)result.snowVertices=std::move(snowVertices);
+    if(gfx::capture::Enabled())result.profileBuilt=gfx::capture::Now();
     return result;
 }
 
 std::future<Chunk> TerrainWorker::Submit(MeshKey key) {
+    const double submitted=gfx::capture::Enabled()?gfx::capture::Now():0;
     auto job=std::make_shared<std::packaged_task<Chunk()>>(
-        [key,foundations=terrain::Foundations(),roads=terrain::Roads()] {
+        [key,submitted,foundations=terrain::Foundations(),roads=terrain::Roads()] {
+            gfx::capture::TileScope profileTile(key.first.x,key.first.z,key.first.level);
+            if(submitted)gfx::capture::Span("world.queue.worker_wait",submitted,gfx::capture::Now()-submitted,"wait");
             terrain::Foundations()=foundations;terrain::Roads()=roads;
             return Build(key.first,key.second);
         });
@@ -248,35 +285,49 @@ void InvalidateEdits() {
         }
     }
     pending=active;pendingCursor=0;
+    publications.clear();
+    localPending.clear();
     if(std::getenv("DC_TERRAIN_PERF"))std::fprintf(stderr,"terrain edit: invalidated %u of %zu cached chunks\n",dirty,cache.size());
 }
 
 void Update(double x, double z, int minimumLevel) {
+    gfx::capture::Scope updateProfile("world.stream.update");
     auto perfStart = std::chrono::steady_clock::now();
     ++cacheClock;
-    // Camera altitude determines detail and the distance between updates.
+    // The tracked world position determines the nested resolution rings.
     // A complete previous selection stays visible until its replacement is ready.
-    double quantum = std::ldexp(256.0, minimumLevel);
+    double quantum = std::ldexp(terrain::BaseSize*2, minimumLevel);
     double cx = std::floor(x / quantum) * quantum, cz = std::floor(z / quantum) * quantum;
+    const bool farRetarget=std::abs(cx-lastX)>4096 || std::abs(cz-lastZ)>4096;
     int    built = 0;
     bool   planned = false;
     // A walking teleport must never display a distant coarse triangle over
     // the destination's collision surface. Finish this one-time load before
     // presenting it; ordinary travel and editor panning keep the 2 ms budget.
-    if (GameMode == ED_MODE_WALK && !DranFlightActive() && minimumLevel == 0 && !active.empty() &&
+    if (GameMode == ED_MODE_WALK && !DranFlightActive() && minimumLevel == 0 && !walkRequested && !active.empty() &&
         (std::abs(cx - lastX) > 4096 || std::abs(cz - lastZ) > 4096)) {
         if(std::getenv("DC_TERRAIN_TRACE"))std::fprintf(stderr,"terrain: loading teleport destination %.2f %.2f before display\n",x,z);
         active.clear();
         pending.clear();
+        localPending.clear();publications.clear();
         pendingCursor = 0;
         lastX = lastZ = 1e30;
     }
-    if(!pending.empty() && minimumLevel!=lastLevel){pending.clear();pendingCursor=0;}
+    if(!pending.empty() && (minimumLevel!=lastLevel || cx!=lastX || cz!=lastZ)){
+        pending.clear();pendingCursor=0;publications.clear();
+        // An editor pan can cross kilometres in a tick. An unfinished local
+        // publication for the previous cursor must not own the urgent queue.
+        if(GameMode==ED_MODE_GEORAMA || std::abs(cx-lastX)>2048 || std::abs(cz-lastZ)>2048){
+            localPending.clear();
+            if(std::getenv("DC_TERRAIN_TRACE"))std::fprintf(stderr,"terrain: retarget %.0f %.0f obsolete local plan discarded\n",x,z);
+        }
+    }
 
     if (pending.empty() && (cx != lastX || cz != lastZ || minimumLevel != lastLevel)) {
         lastX = cx;
         lastZ = cz;
         lastLevel = minimumLevel;
+        gfx::capture::Scope planningProfile("world.stream.plan");
         auto               tiles = terrain::Select(cx, cz, minimumLevel);
         terrain::Selection selection;
         for (auto t : tiles) {
@@ -287,89 +338,154 @@ void Update(double x, double z, int minimumLevel) {
             pending.push_back({t, Edges(t, selection)});
         }
         std::stable_sort(pending.begin(),pending.end(),[&](const auto &a,const auto &b){return terrain::Distance(a.first,x,z)<terrain::Distance(b.first,x,z);});
+        // Large jumps use the near refinement path and final target publication.
+        // Connecting every old/new offscreen tile is quadratic wasted work while panning.
+        publications=(active.empty()||farRetarget)?std::vector<terrain::Publication<MeshKey>>{}:terrain::Publications(active,pending);
         pendingCursor = 0;
         planned = true;
     }
     bool initial = active.empty();
-    // Cold generation has no old coverage to display. Build a bounded batch
-    // in parallel, then upload on the render thread. Build/BiomeBuild only read
-    // prepared assets; terrain, drainage and population caches are thread-local.
-    // Streaming keeps its existing single-job queue and two-millisecond budget.
-    if(initial && !building.valid() && !uploading && pendingCursor<pending.size()) {
-        constexpr size_t capacity=8;
-        static std::array<std::unique_ptr<TerrainWorker>,capacity-1> coldWorkers;
-        const size_t count=std::clamp(size_t(std::thread::hardware_concurrency()/2),size_t(1),capacity);
-        struct Flight { std::future<Chunk> result; MeshKey key; };
-        std::array<Flight,capacity> flights;
-        auto worker=[&](size_t i)->TerrainWorker& {
-            if(i==0)return Worker();
-            if(!coldWorkers[i-1])coldWorkers[i-1]=std::make_unique<TerrainWorker>();
-            return *coldWorkers[i-1];
-        };
-        auto submit=[&](size_t i) {
-            if(pendingCursor>=pending.size())return;
-            auto key=pending[pendingCursor++];
-            flights[i].key=key;flights[i].result=worker(i).Submit(key);
-        };
-        for(size_t i=0;i<count;++i)submit(i);
-        for(;;) {
-            size_t ready=count,first=count;
-            for(size_t i=0;i<count;++i)if(flights[i].result.valid()) {
-                if(first==count)first=i;
-                if(flights[i].result.wait_for(std::chrono::seconds(0))==std::future_status::ready){ready=i;break;}
-            }
-            if(first==count)break;
-            if(ready==count)ready=first;
-            auto chunk=flights[ready].result.get();
-            Upload(chunk,std::chrono::steady_clock::time_point::max());
-            auto key=flights[ready].key;
-            if(auto it=cache.find(key);it!=cache.end()){Destroy(it->second.chunk);it->second={std::move(chunk),cacheClock,false};}
-            else cache.emplace(key,CachedChunk{std::move(chunk),cacheClock,false});
-            ++built;submit(ready);
+    gfx::capture::Counter("world.initial_load",initial);
+    gfx::capture::Counter("world.flight",DranFlightActive());
+    if(!initial && !pending.empty() && localPending.empty()) {
+        gfx::capture::Scope refinementProfile("world.stream.local_plan");
+        localPlanX=x;localPlanZ=z;
+        localPending=terrain::AdaptLocal(active,pending,x,z,Edges);
+        // Plan several budget-neutral transfers before building. Generating
+        // each intermediate seam state wastes jobs that the next split replaces.
+        for(int transfer=1;transfer<4 && !localPending.empty();++transfer){
+            auto next=terrain::AdaptLocal(localPending,pending,x,z,Edges);
+            if(next.empty())break;
+            localPending=std::move(next);
         }
+        std::stable_sort(localPending.begin(),localPending.end(),[&](const auto &a,const auto &b){return terrain::Distance(a.first,x,z)<terrain::Distance(b.first,x,z);});
     }
-    // Bound terrain work during movement. Meshes are cached with their seam
-    // topology, so revisiting a boundary does not destroy and recreate them.
-    while (pendingCursor < pending.size() || building.valid() || uploading) {
-        if(building.valid()) {
-            if(!initial && building.wait_for(std::chrono::seconds(0))!=std::future_status::ready)break;
-            uploading=building.get();
+    if(gfx::capture::Enabled()) {
+        std::set<MeshKey> wanted(pending.begin(),pending.end());wanted.insert(localPending.begin(),localPending.end());
+        std::erase_if(profileRequests,[&](const auto &entry){return !wanted.contains(entry.first);});
+        for(auto &key:wanted)if(!cache.contains(key)||cache.at(key).dirty)profileRequests.try_emplace(key,gfx::capture::Now());
+    }
+    auto ready=[&](const MeshKey &key){auto it=cache.find(key);return it!=cache.end()&&!it->second.dirty;};
+    const auto deadline=initial?std::chrono::steady_clock::time_point::max():perfStart+std::chrono::milliseconds(localPending.empty()?2:4);
+    // Dispatch without blocking, including while another result spans several
+    // upload frames. Never queue more than one chunk per worker.
+    auto dispatch=[&] {
+        gfx::capture::Scope dispatchProfile("world.stream.dispatch");
+        for(size_t i=0;i<WorkerCount();++i){
+            auto &f=flights[i];if(f.building.valid()||f.uploading)continue;
+            // Never let slow continental population jobs occupy every
+            // worker. Reserve half the live workers for near-ring geometry;
+            // those jobs must start as soon as the tracked centre advances.
+            const bool nearOnly=!initial && i<WorkerCount()/2;
+            auto submit=[&](const std::vector<MeshKey> &wanted,bool urgent){for(const auto &key:wanted){
+                if(nearOnly && key.first.level>2 && (!urgent || GameMode==ED_MODE_GEORAMA))continue;
+                if(ready(key))continue;
+                bool busy=false;for(const auto &other:flights)
+                    busy|=(other.building.valid()||other.uploading)&&other.key==key&&other.revision==terrainRevision;
+                if(busy)continue;
+                if(!f.worker)f.worker=std::make_unique<TerrainWorker>();
+                if(auto it=profileRequests.find(key);it!=profileRequests.end()){
+                    gfx::capture::TileScope tile(key.first.x,key.first.z,key.first.level);
+                    gfx::capture::Span("world.queue.scheduler_wait",it->second,gfx::capture::Now()-it->second,"wait");
+                }
+                f.key=key;f.revision=terrainRevision;f.building=f.worker->Submit(key);return true;
+            }return false;};
+            if(!submit(localPending,true))submit(pending,false);
         }
-        if(uploading) {
-            if(buildingRevision!=terrainRevision){Destroy(*uploading);uploading.reset();}
-            else {
-                auto deadline=initial?std::chrono::steady_clock::time_point::max():perfStart+std::chrono::milliseconds(2);
-                if(!Upload(*uploading,deadline))break;
-                auto it=cache.find(buildingKey);
-                if(it!=cache.end()){Destroy(it->second.chunk);it->second={std::move(*uploading),cacheClock,false};}
-                else cache.emplace(buildingKey,CachedChunk{std::move(*uploading),cacheClock,false});
-                uploading.reset();++built;
+    };
+    dispatch();
+    do {
+        bool progress=false;
+        // Collect all completed work before choosing uploads. Worker index is
+        // unrelated to the current destination's urgency.
+        std::array<Flight*,WorkerCapacity> uploadOrder{};
+        for(size_t i=0;i<flights.size();++i){auto &f=flights[i];uploadOrder[i]=&f;
+            if(f.building.valid()&&f.building.wait_for(std::chrono::seconds(0))==std::future_status::ready)
+                f.uploading=f.building.get();
+        }
+        if(GameMode==ED_MODE_GEORAMA)std::stable_sort(uploadOrder.begin(),uploadOrder.end(),[&](auto a,auto b){
+            bool au=std::find(localPending.begin(),localPending.end(),a->key)!=localPending.end();
+            bool bu=std::find(localPending.begin(),localPending.end(),b->key)!=localPending.end();
+            if(au!=bu)return au;
+            return terrain::Distance(a->key.first,x,z)<terrain::Distance(b->key.first,x,z);
+        });
+        for(auto *flight:uploadOrder){auto &f=*flight;
+            if(!f.uploading)continue;
+            bool wanted=std::find(localPending.begin(),localPending.end(),f.key)!=localPending.end() ||
+                        std::find(pending.begin(),pending.end(),f.key)!=pending.end();
+            if(f.revision!=terrainRevision || (!wanted && GameMode==ED_MODE_GEORAMA)){
+                Destroy(*f.uploading);f.uploading.reset();progress=true;
+                gfx::capture::Counter("world.obsolete_upload_discarded",1);continue;
             }
+            if(std::chrono::steady_clock::now()>=deadline)break;
+            gfx::capture::TileScope uploadTile(f.key.first.x,f.key.first.z,f.key.first.level);
+            gfx::capture::Scope uploadProfile("world.upload.total");
+            if(f.uploading->profileBuilt){
+                gfx::capture::Span("world.queue.upload_wait",f.uploading->profileBuilt,gfx::capture::Now()-f.uploading->profileBuilt,"wait");
+                f.uploading->profileBuilt=0;
+            }
+            if(!Upload(*f.uploading,deadline))break;
+            if(auto it=profileRequests.find(f.key);it!=profileRequests.end()){
+                gfx::capture::Span("world.latency.request_to_ready",it->second,gfx::capture::Now()-it->second,"wait");profileRequests.erase(it);
+            }
+            if(gfx::capture::Enabled())f.uploading->profileReady=gfx::capture::Now();
+            if(auto it=cache.find(f.key);it!=cache.end()){Destroy(it->second.chunk);it->second={std::move(*f.uploading),cacheClock,false};}
+            else cache.emplace(f.key,CachedChunk{std::move(*f.uploading),cacheClock,false});
+            f.uploading.reset();++built;progress=true;
         }
-        if(pendingCursor>=pending.size())break;
-        if(!initial && std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-perfStart).count()>=2.)break;
-        const auto &key=pending[pendingCursor];
-        auto it=cache.find(key);
-        if(it!=cache.end() && !it->second.dirty){it->second.used=cacheClock;++pendingCursor;continue;}
-        buildingKey=key;buildingRevision=terrainRevision;
-        building=Worker().Submit(key);
-        // Cursor advances only after the completed chunk is installed. A newer
-        // placement revision discards stale work and resubmits the same tile.
+        dispatch();
+        pendingCursor=std::count_if(pending.begin(),pending.end(),ready);
+        if(pendingCursor==pending.size())break;
+        if(!initial)break;
+        // A dense forest can take much longer than its neighbours. Waiting
+        // indefinitely for worker zero leaves the other completed workers idle.
+        // Poll only during the loading screen; live frames never wait at all.
+        if(!progress)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }while(true);
+    if(!localPending.empty() && std::all_of(localPending.begin(),localPending.end(),ready)){
+        active.swap(localPending);localPending.clear();publications.clear();
+        if(std::getenv("DC_TERRAIN_PERF"))std::fprintf(stderr,"terrain publish local: focus %.0f %.0f chunks %zu plan %.0f %.0f\n",x,z,active.size(),localPlanX,localPlanZ);
+    }
+    for(auto it=publications.begin();localPending.empty() && it!=publications.end();){
+        if(!std::all_of(it->after.begin(),it->after.end(),ready)){++it;continue;}
+        std::set<MeshKey> removed(it->before.begin(),it->before.end());
+        std::erase_if(active,[&](const auto &k){return removed.contains(k);});
+        active.insert(active.end(),it->after.begin(),it->after.end());
+        if(std::getenv("DC_TERRAIN_PERF"))std::fprintf(stderr,"terrain publish region: removed %zu added %zu\n",it->before.size(),it->after.size());
+        it=publications.erase(it);
     }
     if (!pending.empty() && pendingCursor == pending.size()) {
-        active.swap(pending);
-        pending.clear();
-        pendingCursor = 0;
+        active.swap(pending);pending.clear();pendingCursor=0;
+        localPending.clear();publications.clear();
+        if(std::getenv("DC_TERRAIN_PERF"))std::fprintf(stderr,"terrain publish: focus %.0f %.0f lod %d complete %zu\n",lastX,lastZ,lastLevel,active.size());
+    }
+    gfx::capture::Counter("world.active_tiles",double(active.size()));
+    gfx::capture::Counter("world.pending_tiles",double(pending.size()-pendingCursor));
+    gfx::capture::Counter("world.cached_tiles",double(cache.size()));
+    if(gfx::capture::Enabled()) {
+        int busy=0,uploads=0;
+        for(auto &f:flights){busy+=f.building.valid();uploads+=bool(f.uploading);}
+        gfx::capture::Counter("world.workers_busy",busy);
+        gfx::capture::Counter("world.upload_backlog",uploads);
+        gfx::capture::Counter("world.local_pending",double(localPending.size()));
+        terrain::Selection rendered;for(auto &key:active)rendered.emplace(key.first,0);
+        gfx::capture::Counter("world.player_lod",terrain::LevelAt(rendered,x,z));
     }
     // Protect both complete coverage and the selection being prepared.
     for (auto &key : active) {
-        cache.at(key).used = cacheClock;
+        auto &cached=cache.at(key);cached.used = cacheClock;
+        if(cached.chunk.profileReady){
+            gfx::capture::TileScope tile(key.first.x,key.first.z,key.first.level);
+            gfx::capture::Span("world.latency.ready_to_visible",cached.chunk.profileReady,gfx::capture::Now()-cached.chunk.profileReady,"wait");
+            cached.chunk.profileReady=0;
+        }
     }
     for (auto &key : pending) {
         if (auto it = cache.find(key); it != cache.end()) {
             it->second.used = cacheClock;
         }
     }
+    for(auto &key:localPending)if(auto it=cache.find(key);it!=cache.end())it->second.used=cacheClock;
     if (cache.size() > 4096) {
         std::vector<std::pair<unsigned, MeshKey>> oldest;
         for (auto &[key, value] : cache) {
@@ -389,6 +505,11 @@ void Update(double x, double z, int minimumLevel) {
     }
     double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - perfStart).count();
     if (std::getenv("DC_TERRAIN_PERF")) {
+        int centreLevel=-1;
+        for(const auto &key:active){const auto &t=key.first;
+            if(x>=t.left() && x<t.left()+t.size() && z>=t.top() && z<t.top()+t.size())centreLevel=t.level;
+        }
+        std::fprintf(stderr,"terrain centre: level %d\n",centreLevel);
         std::fprintf(stderr, "terrain perf: update %.3f ms built %d chunks %zu cached %zu pending %zu lod %d initial %d\n", elapsed, built, active.size(), cache.size(), pending.size() - pendingCursor, minimumLevel, int(initial));
     }
     if (planned && std::getenv("DC_TERRAIN_TRACE")) {
@@ -402,39 +523,50 @@ void Update(double x, double z, int minimumLevel) {
 } // namespace
 
 bool TownTerrainEnabled(const CEditGround *ground) { return ground && ground->map_no == TOWN_NORUNE; }
+void TownTerrainShutdown(){
+    // Function-static procedural caches are destroyed before global workers.
+    // Join explicitly while those caches and the renderer are still alive.
+    ClearChunks();for(auto &flight:flights){flight.worker.reset();flight.building={};}
+    gfx::capture::Flush();
+}
+
+float TownTerrainCursorHeight(float x,float z) {
+    gfx::capture::Scope profile("world.editor.cursor_surface");
+    const double wx=world::X(x),wz=world::Z(z);
+    for(const auto &key:active){const auto &t=key.first;
+        if(wx<t.left() || wz<t.top() || wx>=t.left()+t.size() || wz>=t.top()+t.size())continue;
+        auto it=cache.find(key);if(it==cache.end())continue;
+        constexpr int n=terrain::Resolution;
+        double u=(wx-t.left())/t.size()*n,v=(wz-t.top())/t.size()*n;
+        int ix=std::clamp(int(u),0,n-1),iz=std::clamp(int(v),0,n-1);u-=ix;v-=iz;
+        const auto &h=it->second.chunk.surface;int a=iz*(n+1)+ix,b=a+1,c=a+n+1,d=c+1;
+        return float((u+v<=1?h[a]*(1-u-v)+h[b]*u+h[c]*v:h[b]*(1-v)+h[c]*(1-u)+h[d]*(u+v-1))+.04);
+    }
+    // Outside prior coverage, use the cheap broad surface until resident
+    // terrain arrives. This is only an aerial camera target, never collision.
+    return float(terrain::FlightSurfaceHeight(wx,wz));
+}
 
 bool TownTerrainRequestWalk(float x,float z) {
     if(!TownTerrainEnabled(pEditGround))return true;
-    const auto start=std::chrono::steady_clock::now();
-    if(building.valid()){auto discarded=building.get();}
-    if(uploading){Destroy(*uploading);uploading.reset();}
-    double wx=world::X(x),wz=world::Z(z);
-    // Refine only the arrival neighbourhood synchronously, retaining the
-    // existing far-world coverage. Trees must be ready before revealing land.
-    std::vector<terrain::Tile> tiles;
-    auto refine=[&](auto &&self,terrain::Tile tile)->void {
-        if(tile.level>0 && terrain::Distance(tile,wx,wz)<std::max(256.,tile.size()*.8)) {
-            for(int zz=0;zz<2;zz++)for(int xx=0;xx<2;xx++)self(self,{tile.x*2+xx,tile.z*2+zz,tile.level-1});
-        } else tiles.push_back(tile);
-    };
-    if(active.empty())for(auto t:terrain::Select(wx,wz,5))refine(refine,t);
-    else for(const auto &key:active)refine(refine,key.first);
-    terrain::Selection selection;for(auto t:tiles)selection.emplace(t,0);
-    std::vector<MeshKey> landing;unsigned built=0;
-    for(auto t:tiles) {
-        MeshKey key{t,Edges(t,selection)};
-        if(!cache.contains(key) || cache.at(key).dirty){auto job=Worker().Submit(key);auto chunk=job.get();Upload(chunk);if(cache.contains(key))Destroy(cache.at(key).chunk);cache.insert_or_assign(key,CachedChunk{std::move(chunk),cacheClock});built++;}
-        landing.push_back(key);
-    }
-    active.swap(landing);pending.clear();pendingCursor=0;lastX=wx;lastZ=wz;lastLevel=-1;
-    if(std::getenv("DC_TERRAIN_TRACE")||std::getenv("DC_TERRAIN_PERF"))std::fprintf(stderr,"terrain: instant landing %.3f ms built %u destination %.2f %.2f\n",std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(),built,wx,wz);
+    walkX=world::X(x);walkZ=world::Z(z);walkRequested=true;
+    // The normal asynchronous queue prepares the destination while the editor
+    // stays open or Dran descends. No future.get or mesh build on this path.
+    if(active.empty()||lastLevel!=0)return false;
+    terrain::Selection selection;for(auto &key:active)if(!cache.at(key).dirty)selection.emplace(key.first,0);
+    for(int dz:{-256,0,256})for(int dx:{-256,0,256})
+        if(terrain::LevelAt(selection,walkX+dx,walkZ+dz)!=0)return false;
     walkRequested=false;
     if(std::getenv("DC_TERRAIN_TRACE"))std::fprintf(stderr,"terrain: landing ready %.2f %.2f lod 0\n",x,z);
     return true;
 }
+
 void TownTerrainCancelWalk(){walkRequested=false;}
 
 void TownTerrainDraw(CEditGround *ground) {
+    gfx::capture::Scope drawProfile("world.record.total");
+    // Interaction regressions exercise real collision/events without building
+    // the unrelated continental render mesh in their offscreen test process.
     if (!TownTerrainEnabled(ground)) {
         ClearChunks();
         return;
@@ -443,12 +575,14 @@ void TownTerrainDraw(CEditGround *ground) {
     InvalidateEdits();
     WorldGeoramaTest(ground);
     world::TestTick();
+    if(std::getenv("DC_TEST_SKIP_TERRAIN_DRAW"))return;
     // Prepare is idempotent; map loaders may reuse the same arena address.
     Prepare(ground);
     BiomePrepare(ground);
     static int testTicks = 0;
     ++testTicks;
-    if (testTicks == 120 && Chara) {
+    int spawnFrame=120;if(const char *frame=std::getenv("DC_TERRAIN_TEST_SPAWN_FRAME"))spawnFrame=std::atoi(frame);
+    if (testTicks == spawnFrame && Chara) {
         if (const char *spawn = std::getenv("DC_TERRAIN_TEST_SPAWN")) {
             double x, z; float angle = 0;
             if (std::sscanf(spawn, "%lf,%lf,%f", &x, &z, &angle) >= 2) {
@@ -468,24 +602,25 @@ void TownTerrainDraw(CEditGround *ground) {
     if (Chara) {
         Chara->GetPosition(pos);
     }
+    if(const char *target=std::getenv("DC_TERRAIN_TEST_LOOK_AT");target && NowCamera==&MainCamera && !DranFlightActive()){
+        double x,z;
+        if(std::sscanf(target,"%lf,%lf",&x,&z)==2){
+            float angle=float(std::atan2(world::X(pos[0])-x,world::Z(pos[2])-z));
+            if(std::getenv("DC_TERRAIN_TEST_LOOK_SWEEP") && testTicks>=180 && testTicks<300)angle+=3.14159265f;
+            MainCamera.SetAngleSoon(angle);
+            MainCamera.Step(-1);
+        }
+    }
     if (GameMode == ED_MODE_GEORAMA && ECursorFrame) {
         pos[0] = ECursorFrame->position[0];
         pos[2] = ECursorFrame->position[2];
     }
+    // Camera altitude changes the view, never the world resolution beneath
+    // the player/editor cursor. Landing uses this same fine ring.
     int minimumLevel = 0;
-    if (DranFlightActive()) {
-        // Flight covers many walking tiles each second. Keep river detail on
-        // the CPU worker, with a smaller aerial selection and no blocking
-        // teleport reload when the complete published selection falls behind.
-        double groundHeight = terrain::FlightSurfaceHeight(world::X(pos[0]), world::Z(pos[2]));
-        double altitude = std::max(0.0, double(pos[1]) - groundHeight);
-        minimumLevel = std::clamp(int(std::log2(std::max(1.0, altitude / 512.0))) + 2, 2, 6);
-    }
-    if (GameMode == ED_MODE_GEORAMA || GameMode == ED_MODE_GEORAMA_MENU_INIT || GameMode == ED_MODE_GEORAMA_MENU) {
-        minimumLevel = std::clamp(int(std::floor(std::log2(std::max(1.f, EditCamera.GetDistance() / 8000.f)))), 0, terrain::MaxLevel - 1);
-    }
-    if(walkRequested)minimumLevel=0;
-    Update(world::X(pos[0]), world::Z(pos[2]), minimumLevel);
+    if(walkRequested){minimumLevel=0;pos[0]=world::LocalX(walkX);pos[2]=world::LocalZ(walkZ);}
+    const double focusX=world::X(pos[0]),focusZ=world::Z(pos[2]);
+    Update(focusX, focusZ, minimumLevel);
     if(std::getenv("DC_WORLD_PRECISION_TRACE")) {
         float eye[4]{},target[4]{};
         if(NowCamera){NowCamera->GetPos(eye);NowCamera->GetRef(target);}
@@ -556,6 +691,9 @@ void TownTerrainDraw(CEditGround *ground) {
     std::vector<WaterDraw> waterDraws;
     state.blend = false;
     state.cull = gfx::CullMode::None;
+    gfx::capture::Scope recordProfile("world.record.chunks");
+    terrain::Selection desiredDraw;
+    if(GameMode==ED_MODE_GEORAMA)for(const auto &key:pending)desiredDraw.emplace(key.first,0);
     for (const auto &key : active) {
         const auto   &tile = key.first;
         const auto   &chunk = cache.at(key).chunk;
@@ -622,7 +760,14 @@ void TownTerrainDraw(CEditGround *ground) {
             gfx::DrawMesh(chunk.snow, 0, chunk.indexCount, constants, snowBinding, overlay, &transform);
         }
         constants.flags &= ~(gfx::kMeshWorldUv | gfx::kMeshTerrainTriplanar);
-        BiomeDraw(chunk.biome,constants,state,transform,testTicks,1);
+        // Retained terrain is only transitional coverage. Its trees must not
+        // retain old near-detail costs after the editor focus has moved away.
+        int foliageLevel=tile.level;
+        if(!desiredDraw.empty()){
+            int desired=terrain::LevelAt(desiredDraw,tile.left()+tile.size()/2,tile.top()+tile.size()/2);
+            foliageLevel=std::max(foliageLevel,desired<0?terrain::MaxLevel:desired);
+        }
+        BiomeDraw(chunk.biome,constants,state,transform,testTicks,1,foliageLevel);
         if(chunk.biome.water.mesh)waterDraws.push_back({&chunk.biome,constants,transform});
     }
     // Forest geometry is submitted with its owning terrain chunk above.

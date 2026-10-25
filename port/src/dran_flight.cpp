@@ -1,4 +1,5 @@
 #include "dran_flight.hpp"
+#include "flight_camera.hpp"
 
 #include <algorithm>
 #include <array>
@@ -46,7 +47,8 @@ std::vector<unsigned int> pack;
 bool                      active = false, landing = false;
 float                     speed = 0, yaw = 0, bank = 0;
 float                     oldDistance = 0, oldHeight = 0;
-float                     lookYaw = 0, lookPitch = 0;
+flightcamera::Orbit cameraOrbit;
+float lookYaw=0,lookPitch=0;
 world::Position           departure;
 float                     departureYaw = 0;
 int                       ticks = 0, messageTicks = 0;
@@ -214,6 +216,7 @@ bool DranFlightStep(CMainChara *rider) {
         departureYaw = yaw;
         oldDistance = MainCamera.GetDistance();
         oldHeight = MainCamera.GetHeight();
+        cameraOrbit.Reset(yaw);
         lookYaw = 0;
         lookPitch = std::atan2(95.f, 260.f);
         TownCombatReset();
@@ -223,6 +226,7 @@ bool DranFlightStep(CMainChara *rider) {
     } else if (allowed && ((GamePad.GetPadDown() & PAD_R3) != 0 && !GamePad.On(PAD_SELECT))) {
         if (landing) {
             landing = false;
+            TownTerrainCancelWalk();
             messageTicks = 0;
         } else {
             landing = SafeLanding(rider->pos[0], rider->pos[2]);
@@ -244,13 +248,6 @@ bool DranFlightStep(CMainChara *rider) {
     float throttle = -GamePad.GetLYf();
     yaw = std::remainder(yaw - turn * .025f, 6.28318530718f);
     const auto &look = InputGetMouseLook();
-    // Mouse and right stick orbit independently of steering. Accumulate both
-    // axes so releasing the controls does not snap the view back behind Dran.
-    lookYaw = std::remainder(lookYaw - look.yaw - GamePad.GetRXf() * .035f, 6.28318530718f);
-    // Almost vertical in either direction; leave one degree to keep the
-    // look-at basis well-defined without flipping the camera upside down.
-    constexpr float pitchLimit = 1.55334306f;
-    lookPitch = std::clamp(lookPitch - look.pitch + GamePad.GetRYf() * .025f, -pitchLimit, pitchLimit);
     bank += (-turn * .25f - bank) * .1f;
     float target = landing ? 0 : std::max(0.f, throttle) * (GamePad.On(PAD_R1) ? 80.f : 28.f);
     speed += std::clamp(target - speed, -2.f, .7f);
@@ -269,8 +266,9 @@ bool DranFlightStep(CMainChara *rider) {
         nx = x;
         nz = z;
         floor = float(world::SurfaceHeight(x, z));
+        bool terrainReady=TownTerrainRequestWalk(x,z);
         y = std::max(floor, y - 5.f);
-        if (y <= floor + .1f && TownTerrainRequestWalk(x, z)) {
+        if (y <= floor + .1f && terrainReady) {
             rider->SetPosition(x, floor, z);
             rider->GetVelocity()->x = rider->GetVelocity()->y = rider->GetVelocity()->z = 0;
             rider->move_info.landed = 0; // Retail collision establishes the actual ground polygon next tick.
@@ -294,6 +292,10 @@ bool DranFlightStep(CMainChara *rider) {
         }
         y = std::min(y, 30000.f);
     }
+    cameraOrbit.Step(1./60,yaw,speed,y-rider->pos[1],
+        -look.yaw-GamePad.GetRXf()*.035,-look.pitch+GamePad.GetRYf()*.025);
+    lookYaw=float(std::remainder(cameraOrbit.yaw-yaw,2*flightcamera::Pi));
+    lookPitch=float(cameraOrbit.pitch);
     rider->SetPosition(nx, y, nz);
     rider->SetRotation(0, yaw, 0);
     rider->GetVelocity()->x = rider->GetVelocity()->y = rider->GetVelocity()->z = 0;
@@ -315,7 +317,7 @@ bool DranFlightStep(CMainChara *rider) {
     MainCamera.Step(1);
     if (Trace() && ticks % 30 == 0) {
         std::fprintf(stderr, "dran: flight x=%.3f y=%.3f z=%.3f speed=%.2f floor=%.3f\n", nx, y, nz, speed, floor);
-        std::fprintf(stderr, "dran: camera yaw=%.4f pitch=%.4f distance=%.3f height=%.3f\n", lookYaw, lookPitch, MainCamera.GetDistance(), MainCamera.GetHeight());
+        std::fprintf(stderr, "dran: camera yaw=%.4f pitch=%.4f distance=%.3f height=%.3f worldyaw=%.4f tick=%u\n", lookYaw, lookPitch, MainCamera.GetDistance(), MainCamera.GetHeight(),cameraOrbit.yaw,ticks);
     }
     return true;
 }

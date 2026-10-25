@@ -1,4 +1,6 @@
+#include "forest_generator_version.hpp"
 #include "town_biomes.hpp"
+#include "gfx/capture.hpp"
 
 #include <chrono>
 #include <cstring>
@@ -6,6 +8,9 @@
 
 #include "editground.hpp"
 #include "forest_kernel.hpp"
+#include "forest_disk_cache.hpp"
+#include "grass_geometry.hpp"
+#include "tree_impostor.hpp"
 #include "framevu1.hpp"
 #include "gfx/tim2.hpp"
 #include "mds.hpp"
@@ -37,7 +42,14 @@ std::array<std::vector<Source>, 4>                undergrowth;
 std::vector<Source>                               cacti;
 std::map<std::string, bool>                       requiredTextures;
 std::array<std::array<std::vector<Source>, 7>, 3> treeLods;
+std::array<std::array<std::vector<BiomeMesh>,7>,3> treePrototypes;
+std::filesystem::path populationCacheRoot;
 std::array<float,7> treeHeights{};
+std::array<float,7> treeRadii{};
+std::map<std::string,gfx::tim2::Image> treeImages;
+std::array<gfx::TextureHandle,7> treeAtlases{};
+std::array<std::pair<float,float>,7> treeBillboardBounds{};
+gfx::MeshHandle treeBillboard=0;
 gfx::MeshHandle                                   treeIdentity = 0;
 
 uint32_t U32(const std::vector<uint8_t> &data, size_t offset) {
@@ -140,6 +152,7 @@ void LoadTextures(const char *town) {
                 source.csm1 = p.clut_csm1;
                 source.swizzled = swizzled;
                 if (auto decoded = gfx::tim2::Decode(source)) {
+                    treeImages[key]=*decoded;
                     std::array<double, 3> sum{}, all{};
                     double                weight = 0, allWeight = 0;
                     const auto           &level = decoded->levels.front();
@@ -443,39 +456,52 @@ void IndexTreeModel(std::vector<Source> &model) {
     }
 }
 
-const std::vector<forest::Tree> &TreePopulation(const terrain::Tile &tile) {
-    struct Entry { std::vector<forest::Tree> trees; uint64_t used; };
-    static thread_local std::map<terrain::Tile,Entry> cache;
-    static thread_local std::vector<terrain::Foundation> foundations;
-    static thread_local std::vector<terrain::Road> roads;
-    static thread_local size_t count=0;
-    static thread_local uint64_t clock=0;
-    auto same=[](const auto &a,const auto &b){return a.size()==b.size() && (a.empty() || std::memcmp(a.data(),b.data(),a.size()*sizeof(a[0]))==0);};
-    if(!same(foundations,terrain::Foundations()) || !same(roads,terrain::Roads())) {
-        cache.clear();count=0;foundations=terrain::Foundations();roads=terrain::Roads();
-    }
-    ++clock;
-    if(auto it=cache.find(tile);it!=cache.end()){it->second.used=clock;return it->second.trees;}
-    auto population=forest::Generate(tile.left(),tile.top(),tile.size());
-    count+=population.size();
-    auto [it,inserted]=cache.emplace(tile,Entry{std::move(population),clock});
-    // Seam topology and terrain mesh resolution do not alter the population.
-    // Keep it across those rebuilds, with a bounded CPU cache for world travel.
-    while(count>2000000 || cache.size()>4096) {
-        auto oldest=cache.end();
-        for(auto candidate=cache.begin();candidate!=cache.end();++candidate)
-            if(candidate!=it && (oldest==cache.end() || candidate->second.used<oldest->second.used))oldest=candidate;
-        if(oldest==cache.end())break;
-        count-=oldest->second.trees.size();cache.erase(oldest);
-    }
-    return it->second.trees;
+std::shared_ptr<const std::vector<forest::Tree>> TreePopulation(const terrain::Tile &tile) {
+    using Population=std::shared_ptr<const std::vector<forest::Tree>>;
+    using Key=std::pair<terrain::Tile,std::vector<double>>;
+    static SharedMemo<Key,Population,1024> cache;
+    std::vector<double> edits;
+    double x=tile.left(),z=tile.top(),size=tile.size();
+    for(auto &p:terrain::Foundations())if(p.x+p.halfX+464>=x&&p.x-p.halfX-464<=x+size&&p.z+p.halfZ+464>=z&&p.z-p.halfZ-464<=z+size)
+        edits.insert(edits.end(),{0,p.x,p.z,p.halfX,p.halfZ,p.height});
+    for(auto &r:terrain::Roads())if(std::max(r.x,r.endX)+264>=x&&std::min(r.x,r.endX)-264<=x+size&&std::max(r.z,r.endZ)+264>=z&&std::min(r.z,r.endZ)-264<=z+size)
+        edits.insert(edits.end(),{1,r.x,r.z,r.endX,r.endZ,r.height,r.endHeight});
+    gfx::capture::Scope populationProfile("world.population.total");
+    return cache.Get(Key{tile,edits},[&]{
+        // Generator content + exact edits identify the population. Bump the
+        // CMake schema version if this key layout or edit filtering changes.
+        std::string diskKey=DC_FOREST_GENERATOR_VERSION;
+        auto append=[&](const auto &value){diskKey.append(reinterpret_cast<const char *>(&value),sizeof(value));};
+        append(tile.x);append(tile.z);append(tile.level);
+        for(double value:edits)append(value);
+        auto path=populationCacheRoot/(std::to_string(forest::CacheHash(diskKey.data(),diskKey.size()))+".forest");
+        // Small populations cost less to regenerate than opening/writing tiny
+        // files. Keep them in the shared memory memo; persist expensive rings.
+        if(tile.level<3){
+            gfx::capture::Scope generationProfile("world.population.generate");
+            return std::make_shared<const std::vector<forest::Tree>>(forest::GenerateCached(x,z,size));
+        }
+        gfx::capture::Scope diskProfile("world.population.disk_read");
+        auto saved=forest::LoadPopulation(path,diskKey);diskProfile.End();
+        gfx::capture::Counter("world.population.disk_hit",bool(saved));
+        if(saved)return std::make_shared<const std::vector<forest::Tree>>(std::move(*saved));
+        gfx::capture::Scope generationProfile("world.population.generate");
+        auto population=forest::GenerateCached(x,z,size);generationProfile.End();
+        gfx::capture::Scope saveProfile("world.population.disk_write");
+        forest::SavePopulation(path,diskKey,population);
+        return std::make_shared<const std::vector<forest::Tree>>(std::move(population));
+    });
 }
+
 } // namespace
 
 gfx::TextureBinding BiomeSurfaceBinding(const char *name) { return Binding(name); }
 
 void BiomePrepare(CEditGround *ground) {
     if (textures.empty()) {
+        populationCacheRoot=PathsSaveRoot()/"terrain-cache";
+        if(const char *root=std::getenv("DC_TERRAIN_CACHE_ROOT"))populationCacheRoot=root;
+        forest::TrimPopulationCache(populationCacheRoot);
         regionalTrees[0] = ReadTree("e02", "e02t01");
         regionalTrees[1] = ReadTree("e03", "e03t02");
         regionalTrees[2] = ReadTree("e04", "e04t01");
@@ -484,25 +510,10 @@ void BiomePrepare(CEditGround *ground) {
         undergrowth[1] = ReadTree("e01", "e01h01", "=kusa__A40N");
         undergrowth[2] = ReadTree("e03", "e03t01", "__a40by");
         undergrowth[3] = ReadTree("e04", "e04m01", "=kusa__a40t");
-        // Scene foliage may cover an entire original map. Give extracted clumps
-        // a predictable physical footprint before scattering them independently.
-        const float widths[] = {55, 30, 22, 38};
-        for (size_t i = 0; i < undergrowth.size(); i++) {
-            std::fprintf(stderr, "biome understory: palette %zu sources %zu\n", i, undergrowth[i].size());
-            float radius = 0;
-            for (const auto &src : undergrowth[i]) {
-                for (const auto &v : src.vertices) {
-                    radius = std::max(radius, std::max(std::abs(v.position[0]), std::abs(v.position[2])));
-                }
-            }
-            float scale = radius > 0 ? std::min(1.f, widths[i] / (2 * radius)) : 1.f;
-            for (auto &src : undergrowth[i]) {
-                for (auto &v : src.vertices) {
-                    for (float &axis : v.position) {
-                        axis *= scale;
-                    }
-                }
-            }
+        for(size_t i=0;i<undergrowth.size();++i){
+            const float heights[]{9,5,5,8};
+            undergrowth[i]=grass::Split(undergrowth[i],heights[i]);
+            std::fprintf(stderr,"biome understory: palette %zu independent tufts %zu\n",i,undergrowth[i].size());
         }
         const char *towns[] = {"e01", "e02", "e03", "e04", "e01", "e04", "e01"};
         const char *parts[] = {"e01t01", "e02t01", "e03t02", "e04t01", "e01t02", "e04t01", "e01t02"};
@@ -529,6 +540,13 @@ void BiomePrepare(CEditGround *ground) {
             }
         }
         requiredTextures["e01/e01b06"]=true;
+        for(int lod=0;lod<3;++lod)for(int species=0;species<7;++species)for(const auto &src:treeLods[lod][species]){
+            auto mesh=PrepareMesh({},src.indices,src.texture);
+            mesh.mesh=gfx::CreateMesh(src.vertices,src.indices);mesh.indices.clear();
+            for(const auto &v:src.vertices)mesh.radius=std::max(mesh.radius,std::hypot(std::hypot(v.position[0],v.position[1]),v.position[2]));
+            treeRadii[species]=std::max(treeRadii[species],mesh.radius);
+            treePrototypes[lod][species].push_back(std::move(mesh));
+        }
         requiredTextures["e01/e01b01"]=true;
         requiredTextures["e02/e02b21"]=true;
         LoadTextures("e01");
@@ -540,6 +558,18 @@ void BiomePrepare(CEditGround *ground) {
             float low=1e20f,high=-1e20f;
             for(const auto &src:treeLods[0][species])for(const auto &v:src.vertices){low=std::min(low,v.position[1]);high=std::max(high,v.position[1]);}
             treeHeights[species]=high-low;
+            auto atlas=impostor::Bake(treeLods[2][species],[](const std::string &name,float u,float v){
+                std::array<uint8_t,4> result{};auto it=treeImages.find(name);if(it==treeImages.end())return result;
+                const auto &image=it->second;const auto &level=image.levels.front();
+                unsigned x=std::min(level.width-1,unsigned((u-std::floor(u))*level.width)),y=std::min(level.height-1,unsigned((v-std::floor(v))*level.height));
+                size_t pixel=y*level.width+x;
+                if(image.format==gfx::TextureFormat::Index8){auto rgba=image.palette[level.pixels[pixel]];std::memcpy(result.data(),&rgba,4);}
+                else std::copy_n(level.pixels.data()+pixel*4,4,result.begin());return result;
+            });
+            treeBillboardBounds[species]={atlas.centre,atlas.radius};
+            std::fprintf(stderr,"tree atlas: species %d centre %.2f radius %.2f height %.2f\n",species,atlas.centre,atlas.radius,treeHeights[species]);
+            gfx::tim2::Image billboardImage;billboardImage.levels.push_back({impostor::Width,impostor::Height,std::move(atlas.pixels)});
+            MakeCanopyMips(billboardImage);treeAtlases[species]=UploadCanopy(billboardImage);
             std::array<double, 3> color{};
             double                n = 0;
             for (auto &src : treeLods[0][species]) {
@@ -558,9 +588,14 @@ void BiomePrepare(CEditGround *ground) {
             auto            &pixel = image.levels.emplace_back();
             pixel.width = pixel.height = 1;
             pixel.pixels = {uint8_t(color[0] / std::max(1., n)), uint8_t(color[1] / std::max(1., n)), uint8_t(color[2] / std::max(1., n)), 255};
+            treeImages["canopy"+std::to_string(species)]=image;
             textures["canopy" + std::to_string(species)] = gfx::tim2::Upload(image);
 
         }
+        treeImages.clear();
+        std::vector<gfx::Vertex3D> quad(4);
+        for(int i=0;i<4;++i){quad[i].position[0]=(i&1)?1:-1;quad[i].position[1]=(i&2)?1:-1;quad[i].uv[0]=(i&1)?1:0;quad[i].uv[1]=(i&2)?0:1;quad[i].normal[1]=1;}
+        treeBillboard=gfx::CreateMesh(quad,std::vector<uint32_t>{0,1,2,2,1,3});
     }
     auto *root = ground->plot_parts[13].frame[0];
     if (!root) {
@@ -620,7 +655,17 @@ void BiomePrepare(CEditGround *ground) {
 }
 
 BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &vertices, const std::vector<uint32_t> &indices) {
+    gfx::capture::Scope biomeProfile("world.build.biome");
+    gfx::capture::Scope materialProfile("world.build.materials");
     BiomeChunk result;
+    result.treeLevel=t.level;
+    const int surfaceGrid=int(std::sqrt(double(vertices.size())))-1;
+    auto displayedGround=[&](double x,double z){
+        double gx=(x-t.left())*surfaceGrid/t.size(),gz=(z-t.top())*surfaceGrid/t.size();
+        int ix=std::clamp(int(gx),0,surfaceGrid-1),iz=std::clamp(int(gz),0,surfaceGrid-1);
+        auto h=[&](int dx,int dz){return vertices[(iz+dz)*(surfaceGrid+1)+ix+dx].position[1];};
+        return grass::TriangleHeight(h(0,0),h(1,0),h(0,1),h(1,1),gx-ix,gz-iz);
+    };
     result.tileSize=float(t.size());
     result.lowY=1e20f;result.highY=-1e20f;
     for (const auto &v : vertices) {
@@ -632,6 +677,8 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
     const char                               *names[] = {"e02/e02b02", "e04/e04b01", "e03/e03b03"};
     std::array<std::vector<gfx::Vertex3D>, 3> layers;
     bool                                      used[3]{};
+    std::vector<terrain::Climate> grassClimate;
+    std::vector<double> grassDensity;
 
     struct WaterVertex {
         gfx::Vertex3D v;
@@ -641,6 +688,10 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
     for (auto v : vertices) {
         double x = t.left() + v.position[0], z = t.top() + v.position[2], h = v.position[1];
         auto   climate = terrain::ClimateAt(x, z, h, t.size()/(std::sqrt(double(vertices.size()))-1));
+        if(t.level==0){
+            grassClimate.push_back(climate);
+            grassDensity.push_back(terrain::UnderstoryDensity(x,z,climate));
+        }
         auto   river = t.level <= 3 ? terrain::RiverAt(x, z) : terrain::RiverSample{};
         double fade = terrain::Smooth(1800, 3500, std::hypot(x, z));
         double bank = (1 - terrain::Smooth(river.width + 35, river.width + 150, river.distance)) * fade;
@@ -649,7 +700,9 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
         auto pan=terrain::DryBasinAt(x,z);
         if(pan.radius)bank=std::max(bank,1-terrain::Smooth(pan.radius*.45,pan.radius*.8,std::hypot(x-pan.x,z-pan.z)));
         double soil=1-terrain::RockExposure(x,z,h,std::clamp(double(v.normal[1]),0.,1.));
-        double weights[] = {climate.forest * fade * soil, climate.sand * fade * soil, bank * soil};
+        double grassCover=(1-terrain::Smooth(.12,.55,climate.sand))*(1-climate.snow)*climate.land;
+        grassCover*=std::clamp(.65+climate.forest*.7,0.,1.);
+        double weights[] = {grassCover * fade * soil, climate.sand * fade * soil, bank * soil};
         for (int i = 0; i < 3; i++) {
             auto p = v;
             p.color[3] = uint8_t(128 * weights[i]);
@@ -662,9 +715,11 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
             result.ground.push_back(PrepareMesh(std::move(layers[i]), indices, names[i]));
         }
     }
+    materialProfile.End();
     // Coarse canopy arrives with terrain, independently of the object streamer.
     // Texture filtering preserves coverage without large triangle-shaped patches.
     {
+        gfx::capture::Scope canopyProfile("world.build.canopy");
         // Continental tiles represent subpixel canopy coverage. Match their
         // texture sampling to their coarse terrain instead of evaluating 1024
         // detailed climate samples for every horizon tile.
@@ -709,7 +764,8 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
         for (auto &v : canopy) {
             // A canopy surface above the land keeps the forest silhouette; at
             // continental scale its area-filtered coverage becomes subpixel.
-            v.position[1] += 150;
+            // Aggregate coverage belongs to the ground, never a floating sheet.
+            v.position[1] += .02f;
             v.color[0] = 200;
             v.color[1] = 0;
             v.color[3] = 128;
@@ -720,6 +776,7 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
     }
     // Clip each surface triangle at the shore instead of drawing a rectangular water sheet.
     {
+        gfx::capture::Scope waterProfile("world.build.water");
         // Water has its own sampling rate. A distant terrain vertex must never
         // drag a river's surface towards the elevation of an unrelated catchment.
         const int n=int(std::sqrt(double(vertices.size())))-1;
@@ -801,71 +858,65 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
             result.water = PrepareMesh(std::move(verts), inds, "e03/e03b07");
         }
     }
-    if (t.level <= 1 && !undergrowth[0].empty()) {
+    if (t.level == 0 && !undergrowth[0].empty()) {
+        gfx::capture::Scope grassProfile("world.build.grass");
         std::map<std::string, Source> batches;
-        // Independent world grids keep placements stable across chunks and LOD changes.
-        for (int layer = 1; layer < 2; layer++) {
-            const double spacing = layer == 0 ? 100 : layer == 1 ? 44
-                                                                 : 72;
-            auto         x0 = int64_t(std::floor(t.left() / spacing)), z0 = int64_t(std::floor(t.top() / spacing));
-            for (auto iz = z0; iz * spacing < t.top() + t.size(); iz++) {
-                for (auto ix = x0; ix * spacing < t.left() + t.size(); ix++) {
-                    uint64_t seed = terrain::Mix(uint64_t(ix) ^ terrain::Mix(uint64_t(iz) + 9181 + layer * 7193));
-                    double   x = (ix + .12 + .76 * double(seed & 65535) / 65535) * spacing, z = (iz + .12 + .76 * double((seed >> 16) & 65535) / 65535) * spacing;
-                    // Own by jittered position, including candidates just outside the tile's nominal grid.
-                    if (x < t.left() || x >= t.left() + t.size() || z < t.top() || z >= t.top() + t.size()) {
-                        continue;
-                    }
-                    if (std::hypot(x, z) < 2200 || Occupied(x, z)) {
-                        continue;
-                    }
-                    double h = terrain::SurfaceHeight(x, z);
-                    auto   c = terrain::ClimateAt(x, z, h);
-                    auto   river = terrain::RiverAt(x, z);
-                    double density=terrain::VegetationDensity(x,z,c);
-                    if(layer==1) density=terrain::UnderstoryDensity(x,z,c);
-                    if(layer==1 && c.sand>.55) density=.003*c.land*(1-c.snow);
-                    if (layer == 2) {
-                        density *= .42;
-                    }
-                    if (double((seed >> 32) & 65535) / 65535 > density || river.distance < river.width + (layer == 1 ? 8 : 30)) {
-                        continue;
-                    }
-                    if (std::abs(terrain::Height(x + 32, z) - h) + std::abs(terrain::Height(x, z + 32) - h) > 30) {
-                        continue;
-                    }
-                    double angle = double(seed >> 48) / 65535 * 6.28318530718, scale = .9 + double((seed >> 24) & 255) / 255 * 1.3;
-                    if (layer == 1) {
-                        scale = .65 + double((seed >> 24) & 255) / 255 * .9;
-                    }
-                    if (layer == 2) {
-                        scale = (c.sand > .4 && (seed & 1)) ? .7 + double((seed >> 24) & 255) / 255 : .25 + double((seed >> 24) & 255) / 255 * .4;
-                    }
-                    double      cs = std::cos(angle) * scale, sn = std::sin(angle) * scale;
-                    int         species = c.sand > .4 ? 2 : c.temperature > .64 ? 1
-                                                                                : (c.forest > .65 && ((seed >> 20) & 3) != 0 ? 0 : -1);
-                    int         groundSpecies = c.sand>.55 ? 3 : c.forest>.65 ? int((seed>>21)%2) : 1+int((seed>>21)%2);
-                    const auto &model = layer == 1 ? undergrowth[groundSpecies] : layer == 2 && c.sand > .4 && (seed & 1)       ? cacti
-                                                                              : species >= 0 && !regionalTrees[species].empty() ? regionalTrees[species]
-                                                                                                                                : trees;
-                    for (const auto &source : model) {
-                        auto    &dest = batches[source.texture];
-                        unsigned first = unsigned(dest.vertices.size());
-                        for (auto v : source.vertices) {
-                            auto p = v;
-                            p.position[0] = float(x - t.left() + cs * v.position[0] + sn * v.position[2]);
-                            p.position[1] = float(h + scale * v.position[1] - .5);
-                            p.position[2] = float(z - t.top() - sn * v.position[0] + cs * v.position[2]);
-                            p.normal[0] = float((cs * v.normal[0] + sn * v.normal[2]) / scale);
-                            p.normal[2] = float((-sn * v.normal[0] + cs * v.normal[2]) / scale);
-                            dest.vertices.push_back(p);
-                        }
-                        for (auto index : source.indices) {
-                            dest.indices.push_back(first + index);
-                        }
-                    }
-                }
+        // Scatter individual retail tufts, not an entire scene-sized clump.
+        // Sample the actual rendered triangles at every blade vertex so grass
+        // follows slopes, stitched edges and flattened Georama foundations.
+        const int n=int(std::sqrt(double(vertices.size())))-1;
+        const double step=t.size()/n;
+        auto ground=[&](double x,double z){
+            double gx=(x-t.left())/step,gz=(z-t.top())/step;
+            if(gx<0||gz<0||gx>n||gz>n)return terrain::SurfaceHeight(x,z)-.04;
+            int ix=std::min(n-1,int(gx)),iz=std::min(n-1,int(gz));
+            auto y=[&](int dx,int dz){return vertices[(iz+dz)*(n+1)+ix+dx].position[1];};
+            return grass::TriangleHeight(y(0,0),y(1,0),y(0,1),y(1,1),gx-ix,gz-iz);
+        };
+        constexpr double spacing=10;
+        auto x0=int64_t(std::floor(t.left()/spacing)),z0=int64_t(std::floor(t.top()/spacing));
+        for(auto iz=z0;iz*spacing<t.top()+t.size();++iz)for(auto ix=x0;ix*spacing<t.left()+t.size();++ix){
+            uint64_t seed=terrain::Mix(uint64_t(ix)^terrain::Mix(uint64_t(iz)+16374));
+            double x=(ix+.12+.76*double(seed&65535)/65535)*spacing;
+            double z=(iz+.12+.76*double((seed>>16)&65535)/65535)*spacing;
+            if(x<t.left()||x>=t.left()+t.size()||z<t.top()||z>=t.top()+t.size()||std::hypot(x,z)<2200||Occupied(x,z))continue;
+            // Ecology shares the ring's spatial sample grid, just like the
+            // supporting surface. Do not regenerate drainage and weathering
+            // for thousands of individual ten-unit grass candidates.
+            double gx=(x-t.left())/step,gz=(z-t.top())/step;
+            int cx=std::clamp(int(gx),0,n-1),cz=std::clamp(int(gz),0,n-1);
+            auto interpolate=[&](auto value){return std::lerp(
+                std::lerp(value(cz*(n+1)+cx),value(cz*(n+1)+cx+1),gx-cx),
+                std::lerp(value((cz+1)*(n+1)+cx),value((cz+1)*(n+1)+cx+1),gx-cx),gz-cz);};
+            terrain::Climate c{};
+            c.sand=interpolate([&](int i){return grassClimate[i].sand;});
+            c.forest=interpolate([&](int i){return grassClimate[i].forest;});
+            double density=interpolate([&](int i){return grassDensity[i];});
+            if(double((seed>>32)&65535)/65535>density)continue;
+            auto river=terrain::RiverAt(x,z);
+            if(river.distance<river.width+8)continue;
+            double slope=std::hypot(ground(x+2,z)-ground(x-2,z),ground(x,z+2)-ground(x,z-2))/4;
+            if(slope>.85)continue;
+            int species=c.sand>.55?3:c.forest>.65?int((seed>>21)%2):1+int((seed>>21)%2);
+            const auto &palette=undergrowth[species];if(palette.empty())continue;
+            const auto &source=palette[terrain::Mix(seed)%palette.size()];
+            double angle=double(seed>>48)/65535*6.28318530718,scale=.8+double((seed>>24)&255)/255*.6;
+            double cs=std::cos(angle)*scale,sn=std::sin(angle)*scale;
+            auto &dest=batches[source.texture];
+            if(dest.vertices.size()+source.vertices.size()>16384 && !dest.indices.empty()){
+                result.trees.push_back(PrepareMesh(std::move(dest.vertices),dest.indices,source.texture));dest={};
             }
+            unsigned first=unsigned(dest.vertices.size());
+            for(auto v:source.vertices){
+                auto p=v;
+                double wx=x+cs*v.position[0]+sn*v.position[2],wz=z-sn*v.position[0]+cs*v.position[2];
+                p.position[0]=float(wx-t.left());p.position[2]=float(wz-t.top());
+                p.position[1]=float(ground(wx,wz)+scale*v.position[1]-.08);
+                p.normal[0]=float((cs*v.normal[0]+sn*v.normal[2])/scale);
+                p.normal[2]=float((-sn*v.normal[0]+cs*v.normal[2])/scale);
+                dest.vertices.push_back(p);
+            }
+            for(auto index:source.indices)dest.indices.push_back(first+index);
         }
         for (auto &[name, batch] : batches) {
             if (!batch.indices.empty()) {
@@ -875,36 +926,40 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
     }
     // Tree geometry is part of the terrain's atomic readiness, not a second
     // streaming queue. The same world population owns every tile partition.
-    if (t.level <= 5 && !treeLods[0][0].empty()) {
-        const auto &population = TreePopulation(t);
+    if (t.level <= 7 && !treeLods[0][0].empty()) {
+        gfx::capture::Scope treesProfile("world.build.forest");
+        auto ownedPopulation = TreePopulation(t);
+        const auto &population=*ownedPopulation;
         uint64_t ids = 0;
         for (const auto &tree : population) ids ^= tree.id;
-        for (int lod = (t.level <= 2 ? 0 : 2); lod < 3; ++lod) {
-            std::map<std::string, Source> batches;
-            for (const auto &tree : population) {
-                double cs = std::cos(tree.yaw)*tree.scale, sn = std::sin(tree.yaw)*tree.scale;
-                float height=treeHeights[tree.species];
-                for (const auto &src : treeLods[lod][tree.species]) {
-                    auto &dest=batches[src.texture];
-                    unsigned first=unsigned(dest.vertices.size());
-                    for (auto v : src.vertices) {
-                        auto p=v;
-                        p.position[0]=float(tree.x-t.left()+cs*v.position[0]+sn*v.position[2]);
-                        p.position[1]=float(tree.y+tree.scale*v.position[1]-.5);
-                        p.position[2]=float(tree.z-t.top()-sn*v.position[0]+cs*v.position[2]);
-                        p.normal[0]=float((cs*v.normal[0]+sn*v.normal[2])/tree.scale);
-                        p.normal[2]=float((-sn*v.normal[0]+cs*v.normal[2])/tree.scale);
-                        unsigned physicalHeight=unsigned(std::clamp(std::ceil(height*tree.scale),1.,65535.));
-                        p.color[0]=uint8_t(physicalHeight&255);p.color[1]=uint8_t(physicalHeight>>8);p.color[3]=128;
-                        dest.vertices.push_back(p);
-                    }
-                    for (auto index : src.indices) dest.indices.push_back(first+index);
-                }
+        {
+            // Keep every tree, but give coarse tiles spatially bounded batches.
+            // A continental tile must not submit its entire forest merely
+            // because one corner intersects the camera.
+            using Page=std::pair<int,int>;
+            std::array<std::map<Page,std::vector<gfx::Vertex3D>>,7> batches;
+            std::array<BiomeMesh,7> buffers;
+            auto finish=[&](int species){auto &mesh=buffers[species];if(mesh.vertices.empty())return;
+                mesh.count=unsigned(mesh.vertices.size());mesh.indices={0,0,0};
+                result.instances[species].push_back(std::move(mesh));mesh={};
+            };
+            auto flush=[&](int species,std::vector<gfx::Vertex3D> &vertices){if(vertices.empty())return;
+                auto &mesh=buffers[species];if(mesh.vertices.size()+vertices.size()>16384)finish(species);
+                BiomeMesh::Page page{unsigned(mesh.vertices.size()),unsigned(vertices.size()),{}};
+                for(const auto &v:vertices)page.bounds.Add(v.position,treeRadii[species]*v.normal[2],float(unsigned(v.color[0])+256*unsigned(v.color[1])));
+                mesh.pages.push_back(page);mesh.vertices.insert(mesh.vertices.end(),vertices.begin(),vertices.end());vertices={};
+            };
+            for(const auto &tree:population){
+                gfx::Vertex3D instance{};
+                instance.position[0]=float(tree.x-t.left());instance.position[1]=float(displayedGround(tree.x,tree.z)-.5);instance.position[2]=float(tree.z-t.top());
+                instance.normal[0]=float(std::cos(tree.yaw)*tree.scale);instance.normal[1]=float(std::sin(tree.yaw)*tree.scale);instance.normal[2]=float(tree.scale);
+                unsigned height=unsigned(std::clamp(std::ceil(treeHeights[tree.species]*tree.scale),1.,65535.));
+                instance.color[0]=uint8_t(height&255);instance.color[1]=uint8_t(height>>8);instance.color[3]=128;
+                auto &page=batches[tree.species][{int(instance.position[0]/4096),int(instance.position[2]/4096)}];
+                page.push_back(instance);if(page.size()>=16384)flush(tree.species,page);
             }
-            for (auto &[texture,batch] : batches) if (!batch.indices.empty()) {
-                result.forest[lod].push_back(PrepareMesh(std::move(batch.vertices), batch.indices, texture));
-            }
-            result.forestMask |= 1u<<lod;
+            for(int species=0;species<7;++species){for(auto &[key,page]:batches[species])flush(species,page);finish(species);}
+            result.forestMask=1u<<std::min(t.level,2);
         }
         if (std::getenv("DC_FOREST_TRACE")) std::fprintf(stderr,"terrain forest ready: %lld %lld level %d trees %zu ids %llu mask %u\n",
             (long long)t.x,(long long)t.z,t.level,population.size(),(unsigned long long)ids,result.forestMask);
@@ -917,6 +972,8 @@ bool BiomeUpload(BiomeChunk &chunk, std::chrono::steady_clock::time_point deadli
     auto upload=[&](BiomeMesh &m) {
         if(m.indices.empty())return true;
         if(std::chrono::steady_clock::now()>=deadline)return false;
+        gfx::capture::Scope meshUpload("world.upload.mesh");
+        gfx::capture::Counter("world.upload.mesh_bytes",double(m.vertices.size()*sizeof(gfx::Vertex3D)+m.indices.size()*sizeof(uint32_t)));
         m.mesh=gfx::CreateMesh(m.vertices,m.indices);
         std::vector<gfx::Vertex3D>().swap(m.vertices);
         std::vector<uint32_t>().swap(m.indices);
@@ -926,15 +983,18 @@ bool BiomeUpload(BiomeChunk &chunk, std::chrono::steady_clock::time_point deadli
     for(auto &m:chunk.trees)if(!upload(m))return false;
     for(auto &m:chunk.canopy)if(!upload(m))return false;
     for(auto &lod:chunk.forest)for(auto &m:lod)if(!upload(m))return false;
+    for(auto &species:chunk.instances)for(auto &m:species)if(!upload(m))return false;
     if(!upload(chunk.water))return false;
     if(!chunk.canopyImage.levels.empty()) {
         if(std::chrono::steady_clock::now()>=deadline)return false;
+        gfx::capture::Scope textureUpload("world.upload.texture");
         chunk.canopyTexture=UploadCanopy(chunk.canopyImage);chunk.canopyImage={};
     }
     return true;
 }
 
 void BiomeDestroy(BiomeChunk &chunk) {
+    for(auto &species:chunk.instances)for(auto &m:species)gfx::DestroyMesh(m.mesh);
     for (auto &lod : chunk.forest) for (auto &m : lod) gfx::DestroyMesh(m.mesh);
     for (auto &m : chunk.canopy) {
         gfx::DestroyMesh(m.mesh);
@@ -952,7 +1012,9 @@ void BiomeDestroy(BiomeChunk &chunk) {
     chunk = {};
 }
 
-void BiomeDraw(const BiomeChunk &chunk, gfx::MeshConstants constants, gfx::DrawState state, const gfx::MeshTransform &transform, double time, int pass) {
+void BiomeDraw(const BiomeChunk &chunk, gfx::MeshConstants constants, gfx::DrawState state, const gfx::MeshTransform &transform, double time, int pass, int targetLevel) {
+    const int treeLevel=std::max(chunk.treeLevel,targetLevel);
+    const unsigned forestMask=treeLevel<=7?(1u<<std::min(treeLevel,2)):0;
     auto overlay = state;
     overlay.blend = true;
     overlay.alpha = {};
@@ -973,8 +1035,8 @@ void BiomeDraw(const BiomeChunk &chunk, gfx::MeshConstants constants, gfx::DrawS
     constants.flags = gfx::kMeshLit | gfx::kMeshAtmosphere;
     if (pass == 1) {
         auto treeConstants=constants;
-        treeConstants.flags=gfx::kMeshLit|gfx::kMeshAtmosphere|gfx::kMeshTreeLod;
-        treeConstants.world_uv[0][1]=float(chunk.forestMask);
+        treeConstants.flags=gfx::kMeshLit|gfx::kMeshAtmosphere|gfx::kMeshTreeLod|gfx::kMeshRingFoliage;
+        treeConstants.world_uv[0][1]=float(forestMask);
         treeConstants.world_uv[0][2]=std::abs(transform.projection[5])*224.f;
         treeConstants.world_uv[0][3]=1;
         treeConstants.world_uv[1][0]=0;
@@ -987,19 +1049,51 @@ void BiomeDraw(const BiomeChunk &chunk, gfx::MeshConstants constants, gfx::DrawS
         double farDistance=std::hypot(std::hypot(std::max(std::abs(eye[0]),std::abs(eye[0]-chunk.tileSize)),
                                                std::max(std::abs(eye[2]),std::abs(eye[2]-chunk.tileSize))),
                                      std::max(std::abs(eye[1]-chunk.lowY),std::abs(eye[1]-chunk.highY)));
-        for (int lod=0;lod<3;++lod) {
+        for (int lod=0;lod<3 && treeLevel<=7;++lod) {
             if(std::getenv("DC_DISABLE_FOREST_MESHES"))break;
-            if(chunk.forestMask==7 && ((lod==0 && nearDistance>2600) ||
+            if(forestMask==7 && ((lod==0 && nearDistance>2600) ||
                 (lod==1 && (nearDistance>7000 || farDistance<1800)) || (lod==2 && farDistance<5000)))continue;
             treeConstants.world_uv[0][0]=float(lod);
             for (const auto &m : chunk.forest[lod]) gfx::DrawMesh(m.mesh,0,m.count,treeConstants,Binding(m.texture),foliage,&transform);
+            if(lod==std::min(treeLevel,2))for(int species=0;species<7;++species)for(const auto &instances:chunk.instances[species]){
+             for(int representation=treeLevel<3?1:0;representation==(treeLevel<3?1:0);++representation){
+              unsigned first=0,count=0;
+              auto draw=[&]{if(!count)return;
+               if(representation==0){
+                auto bill=treeConstants;bill.flags|=gfx::kMeshTreeBillboard|gfx::kMeshRingFoliage;
+                bill.world_uv[1][0]=treeBillboardBounds[species].first;
+                bill.world_uv[1][1]=treeBillboardBounds[species].second;
+                bill.world_uv[1][2]=treeRadii[species];
+                gfx::TextureBinding atlasBinding{};atlasBinding.texture=treeAtlases[species];atlasBinding.filter=gfx::Filter::Linear;
+                gfx::DrawMeshInstanced(treeBillboard,0,6,instances.mesh,count,bill,atlasBinding,foliage,&transform,first);
+               }else{
+                auto detailConstants=treeConstants;
+                for(const auto &prototype:treePrototypes[lod][species]){
+                    detailConstants.world_uv[1][2]=prototype.radius;
+                    gfx::DrawMeshInstanced(prototype.mesh,0,prototype.count,instances.mesh,count,detailConstants,Binding(prototype.texture),foliage,&transform,first);
+                }
+               }
+                count=0;
+              };
+              for(const auto &page:instances.pages){
+                if(!page.bounds.Visible(treeConstants.mvp,treeConstants.world_uv[0][2],0.f)){draw();continue;}
+                if(!count)first=page.first;
+                count+=page.count;
+              }
+              draw();
+             }
+            }
         }
+        auto grassConstants=constants;
+        grassConstants.flags|=gfx::kMeshGrass;
         for (auto &m : chunk.trees) {
-            gfx::DrawMesh(m.mesh, 0, m.count, constants, Binding(m.texture), foliage, &transform);
+            if(nearDistance>2400)break;
+            gfx::DrawMesh(m.mesh, 0, m.count, grassConstants, Binding(m.texture), foliage, &transform);
         }
         constants.flags = gfx::kMeshLit | gfx::kMeshAtmosphere | gfx::kMeshCanopy | gfx::kMeshRegionalCanopy;
         constants.world_uv[0][2] = std::abs(transform.projection[5]) * 224.f;
-        constants.world_uv[0][3] = 1;
+        constants.world_uv[0][3] = forestMask ? 1.f : 0.f;
+        constants.flags |= gfx::kMeshRingFoliage;
         for (auto &m : chunk.canopy) {
             if (std::getenv("DC_DISABLE_CANOPY")) {
                 continue;

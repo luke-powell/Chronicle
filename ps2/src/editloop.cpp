@@ -1,4 +1,7 @@
 #ifdef PORT
+#include "gfx/capture.hpp"
+#endif
+#ifdef PORT
 #include "world_origin.hpp"
 #include "dran_flight.hpp"
 #endif
@@ -3878,8 +3881,26 @@ void MoveChara() {
     EdMoveCharaInfo.fishing = (GameMode == ED_MODE_FISHING);
 #ifdef PORT
     if (DranFlightStep(static_cast<CMainChara *>(Chara))) return;
+    if (const char *test = std::getenv("DC_TEST_TOWN_DOOR")) {
+        static bool placed=false;
+        if (!placed && loop_counter>120) {
+            for(int i=0;i<info->event_count;++i) {
+                auto &point=info->work.events.points[i];
+                if(point.event_type!=ED_EVENT_POINT_DOOR || point.parts_no!=std::atoi(test))continue;
+                auto *part=pEditGround->GetPartsObject(point.parts_no);if(!part)continue;
+                sceVu0FVECTOR p,r;sceVu0CopyVector(p,point.position);sceVu0CopyVector(r,point.rotation);
+                GetPosRot(part,p,r);Chara->SetPosition(p);Chara->SetRotation(r);placed=true;
+                std::fprintf(stderr,"door test: placed plot %d at %.2f %.2f %.2f enabled %d range %.2f destination %s\n",point.parts_no,p[0],p[1],p[2],CheckEventPoint(&point,NowTime),point.trigger_range[0],point.destination);
+                break;
+            }
+        }
+    }
 #endif
     EdMoveChara();
+#ifdef PORT
+    if(std::getenv("DC_TEST_TOWN_DOOR") && GamePad.Down(PAD_CROSS))
+        std::fprintf(stderr,"door test: cross ready %d kind %d acted %d event %d keylock %d\n",EdMoveCharaInfo.event_ready,int(EdMoveCharaInfo.param.kind),EdMoveCharaInfo.acted,EdMoveCharaInfo.event_no,key_lock);
+#endif
 
     if (EdMoveCharaInfo.system_event_no > 0) {
         RunSystemEvent(EdMoveCharaInfo.system_event_no, &MainCamera);
@@ -3893,6 +3914,9 @@ void MoveChara() {
                 RunEvent(130, &MainCamera);
             } else if (EdPadDown(0x40, 1) != 0 && EdCheckViewMode() == 0 && key_lock == 0) {
                 ED_EVENT_POINT *point = param->point;
+#ifdef PORT
+                if(std::getenv("DC_TEST_TOWN_DOOR"))std::fprintf(stderr,"door test: entering %s\n",point->destination);
+#endif
 
                 if (point->minimum_progress > 0) {
                     RunEvent(EdInitGotoInterior(&EdEventInfo, param), NowCamera);
@@ -4100,9 +4124,17 @@ int CheckEditToWalk(float *position) {
     pos[1] += 500.0f;
     int poly_count = pEditGround->PickUpPoly(polys, box, 0);
     int walkable = 1;
+#ifdef PORT
+    // Every probe must start above the same standing space. pos.y is updated
+    // after each hit; reusing it starts later probes below an uphill surface.
+    const float landingRayTop = pos[1];
+#endif
 
     for (int i = 0; i < 4; i++) {
         sceVu0CopyVector(from, pos);
+#ifdef PORT
+        from[1] = landingRayTop;
+#endif
 
         if (i == 1) {
             from[0] += 0.10000000149011612f;
@@ -4192,6 +4224,9 @@ int CheckEditToWalk(float *position) {
  * @size 0xB40
  */
 void MoveEditCursor() {
+#ifdef PORT
+    gfx::capture::Scope profile("world.editor.move_cursor");
+#endif
     float pos[4];
     float camera_distance[3] = {1000.0f, 2000.0f, 4000.0f};
     float camera_height[3] = {1000.0f, 1400.0f, 2000.0f};
@@ -4282,6 +4317,14 @@ void MoveEditCursor() {
 
     float move[4] = {step_x, 0.0f, step_z, 0.0f};
 
+#ifdef PORT
+    if(TownTerrainEnabled(pEditGround) && camera_distance[0]>10000 && NowSelectParts<0){
+        // The retail limiter also performs an exact ground query. Free aerial
+        // surveying has no town boundary and does not need that duplicate work.
+        pos[0]+=move[0];pos[2]+=move[2];
+        pos[1]=TownTerrainCursorHeight(pos[0],pos[2]);
+    } else
+#endif
     LimitEditCursorPos(pos, move);
 
     if (move[0] != 0.0f || move[2] != 0.0f) {
@@ -4436,7 +4479,9 @@ void MoveEditCursor() {
 
 #ifdef PORT
     if (WorldGeoramaOutside(pEditGround, pos[0], pos[2])) {
-        pos[1] = WorldGeoramaHeight(pos[0], pos[2]);
+        pos[1] = camera_distance[0]>10000 && NowSelectParts<0
+            ? TownTerrainCursorHeight(pos[0],pos[2])
+            : WorldGeoramaHeight(pos[0], pos[2]);
     } else
 #endif
     if (pEditGround->GetAreaCode(pos[0], pos[1], pos[2]) >= 0) {

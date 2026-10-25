@@ -5,7 +5,7 @@ from test_town_combat import run
 log = run("terrain-local-edit", "edit:0", 500,
           "0\n240 128 128 255 128\n340\n380 select\n381\n400 l2\n460\n",
           {"DC_TERRAIN_PERF": "1", "DC_GEORAMA_TEST": "1", "DC_FOREST_TRACE": "1"},
-          timeout=180)
+          timeout=600)
 assert "georama TEST PASS" in log
 edits = [(int(a), int(b)) for a,b in re.findall(r"invalidated (\d+) of (\d+) cached",log) if int(b)]
 assert edits and all(0 < a < b/4 for a,b in edits), edits

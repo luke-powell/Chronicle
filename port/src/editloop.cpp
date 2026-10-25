@@ -1,3 +1,4 @@
+#include "gfx/capture.hpp"
 #include "dran_flight.hpp"
 #include "world_origin.hpp"
 #include "biome_music.hpp"
@@ -229,6 +230,7 @@ PORT_OVERRIDE int EdSetMapFlag(int flag_no, int value) {
  * @size 0x1FE8
  */
 PORT_OVERRIDE int EditLoop() {
+    gfx::capture::Scope tickProfile("game.town_tick");
     struct TickTimer {
         std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
         ~TickTimer(){if(std::getenv("DC_TERRAIN_PERF"))std::fprintf(stderr,"town tick: %.3f ms mode %d\n",std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(),int(GameMode));}
@@ -554,11 +556,11 @@ PORT_OVERRIDE int EditLoop() {
         case ED_MODE_GEORAMA:
             GamePad.SetAutoRepeat(PAD_DPAD, 20, 5);
             NowCamera = static_cast<CCamera *>(&EditCamera);
-            MainEditMode();
+            {gfx::capture::Scope profile("world.editor.main");MainEditMode();}
             if(EditMenuStatus.mode==EDIT_MENU_MODE_CLOSED)EditMenuStatus.mode=EDIT_MENU_MODE_MOVE;
-            EditMode();
-            NowCamera->Step(1);
-            pEditGround->EditAreaClip(NowCamera, -1.0f);
+            {gfx::capture::Scope profile("world.editor.edit");EditMode();}
+            {gfx::capture::Scope profile("world.editor.camera");NowCamera->Step(1);}
+            {gfx::capture::Scope profile("world.editor.clip");pEditGround->EditAreaClip(NowCamera, -1.0f);}
 
             if (goto_cmp_event != 0) {
                 goto_return_menu = 0;
@@ -848,7 +850,7 @@ PORT_OVERRIDE int EditLoop() {
     }
 
     static bool waitingForTerrain=false;
-    if(GameMode!=ED_MODE_GEORAMA || EdPadDown(PAD_CIRCLE,2)!=0) {waitingForTerrain=false;TownTerrainCancelWalk();}
+    if(GameMode!=ED_MODE_GEORAMA || EdPadDown(PAD_CIRCLE,2)!=0) {waitingForTerrain=false;if(!DranFlightActive())TownTerrainCancelWalk();}
     if ((EdDebugMoveFlag > 0 || MapNo < TOWN_COUNT) && (EdPadDown(0x100, 2) != 0 || waitingForTerrain) && EdCheckViewMode() == 0 && change_time_event == 0) {
         sceVu0FVECTOR at;
 
@@ -1196,7 +1198,10 @@ PORT_OVERRIDE int EditLoop() {
     SndStep();
     sceVu0FVECTOR musicPosition{};
     if (Chara) Chara->GetPosition(musicPosition);
-    BiomeMusicTick(false, MapNo == 0 && Chara && loop_counter > 60 && GameMode != ED_MODE_EVENT,
+    // Music loads share the retail read buffer with pending interior assets.
+    // Never advance a playlist fade/load while a door or map transition owns it.
+    BiomeMusicTick(false, MapNo == 0 && Chara && loop_counter > 60 &&
+                   (GameMode == ED_MODE_WALK || GameMode == ED_MODE_GEORAMA || GameMode == ED_MODE_GEORAMA_MENU),
                    world::X(musicPosition[0]), world::Z(musicPosition[2]));
     loop_counter++;
     key_counter++;
@@ -1344,7 +1349,8 @@ void EditMainDraw() {
 
                 sceVu0CopyVector(at, ECursorFrame->position);
                 colour[1] = NowCursorRotY;
-                at[1] = pEditGround->GetAlt(at[0], at[1], at[2]);
+                if(NowSelectParts>=0 || !TownTerrainEnabled(pEditGround))
+                    at[1] = pEditGround->GetAlt(at[0], at[1], at[2]);
                 pEditGround->DrawPartsCursor(NowSelectParts, at, NowPartsCursorPos, NowSelectAngle, colour, 1);
             }
 
@@ -1358,7 +1364,8 @@ void EditMainDraw() {
 
                 sceVu0CopyVector(at2, ECursorFrame->position);
                 colour2[1] = NowCursorRotY;
-                at2[1] = pEditGround->GetAlt(at2[0], at2[1], at2[2]);
+                if(NowSelectParts>=0 || !TownTerrainEnabled(pEditGround))
+                    at2[1] = pEditGround->GetAlt(at2[0], at2[1], at2[2]);
                 pEditGround->DrawPartsCursor(NowSelectParts, at2, NowPartsCursorPos, NowSelectAngle, colour2, 2);
             }
 

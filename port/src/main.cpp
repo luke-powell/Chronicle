@@ -58,6 +58,7 @@ void TouchOverlayPoll();
 #include "screen.hpp"
 #include "snd.hpp"
 #include "title/opening.hpp"
+#include "town_terrain.hpp"
 #include "title/rushmovi.hpp"
 #include "title/title.hpp"
 #include "title/title_port.hpp"
@@ -512,7 +513,7 @@ int Run(int argc, const char **argv) {
     AudioOutputStart(audio::DefaultMixer().Rate(), RenderAudio, nullptr);
 
     ClockSetTickRate(config.tick_rate);
-    ClockSetUnbounded(options.headless);
+    ClockSetUnbounded(options.headless && !std::getenv("DC_TEST_REALTIME"));
     ClockAddPumpHook(PumpHost);
     GameSetFrameBudget(options.frames);
     ApplyDiscord(config);
@@ -537,6 +538,7 @@ int Run(int argc, const char **argv) {
     DiscordStop();
     AudioOutputStop();
     InputShutdown();
+    TownTerrainShutdown();
     gfx::RendererShutdown();
     WindowShutdown();
     return status;

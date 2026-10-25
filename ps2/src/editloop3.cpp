@@ -1,4 +1,7 @@
 #ifdef PORT
+#include "gfx/capture.hpp"
+#endif
+#ifdef PORT
 #include "world_georama.hpp"
 #include "town_terrain.hpp"
 #endif
@@ -2434,6 +2437,9 @@ static float GetMaxHeightCursor(float *position) {
 }
 
 void LimitEditCursorPos(float *position, float *movement) {
+#ifdef PORT
+    gfx::capture::Scope profile("world.editor.limit_cursor");
+#endif
 #ifdef PORT
     if (TownTerrainEnabled(pEditGround)) { position[0]+=movement[0];position[2]+=movement[2];position[1]=WorldGeoramaHeight(position[0],position[2]);return; }
 #endif

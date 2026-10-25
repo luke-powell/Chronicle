@@ -45,3 +45,69 @@ Regression tools
   retained initial canopy across all levels, and ordinary update p99 budget.
 - tools/test_world_player_save.py: real native autosave, sidecar and exact global
   position/facing round-trip, including the arrival event.
+
+
+2026-10-24: shared player-centred resolution rings
+------------------------------------------------
+Selection is now an 8x8 finest square followed by 18 nested 8x8 squares
+with their 4x4 interiors removed. Boundaries snap to two tiles at each
+level. This gives exactly 928 terrain tiles, each 16x16 cells / 512
+triangles (475,136 base terrain triangles total). Water, ground materials,
+snow and foliage are additional passes, not included in that base count.
+Tile width doubles at each level. The finest square guarantees a 1024-unit
+radius in X/Z around the tracked point. The outer square guarantees over
+2,300 miles in every direction, and remains centred on that tracked point.
+Walking/flight track the player; Georama tracks the placement cursor.
+Camera altitude and orientation never remove the finest ring.
+
+Local asynchronous publication pairs near refinements with trailing coarsenings,
+so its rendered tile count stays fixed while movement shifts resolution.
+The old complete coverage remains displayed until replacement chunks
+(including foliage) have uploaded. Pending/cache meshes consume extra
+bounded storage; they are not extra rendered rings. Teleports still require
+loading: a finite renderer cannot promise instant generation of unseen data.
+
+Foliage representation is owned by each terrain tile: native model LODs
+at levels 0..2, native-texture instanced billboards at 3..7, aggregate
+forest coverage on the ground mesh beyond that. Billboard physical sizes
+are independent of tile size. There are no camera-distance visibility fades
+for these ring-owned trees. Aggregate canopy is no longer raised 150 units
+over the land. Far aggregate coverage is ecological density sampling, not
+an exhaustive enumeration of trillions of individual trees. Individual
+foliage counts still vary by biome; only the base terrain triangle count
+is identical between tiles.
+
+Validation: test_terrain_rings.cpp checks exact budgets, near resolution,
+coverage and balanced seams across 240 positions including +/-1e12, and
+incremental publications. test_ring_views.py checks zooming out/in
+retains 928 tiles and finest LOD. test_world_streaming.py also checks the
+player's resident tile remains LOD 0 throughout its sustained flight.
+
+Editor retargeting and landing regression
+-----------------------------------------
+- Landing probes now share a fixed starting altitude. Previously each successful
+  probe lowered the next ray to one unit above the previous hit; an uphill next
+  sample could lie above that ray. Reproduced at world (10000, 289818): the fourth
+  probe missed before the change and hits afterwards.
+- Editor target changes discard the previous local publication plan. Finished
+  results no longer needed by the new editor target are discarded before upload.
+- Upload ordering first completes dependencies of the current local publication,
+  then orders by distance to the current focus. Four workers remain available
+  for near geometry during editor panning, even during coarse local refinement.
+- Large jumps skip expensive old/new region connectivity construction; the near
+  refinement path and complete-target publication handle those transitions.
+- Far aerial cursor height samples the resident terrain triangles. Holding a
+  building, zooming close and landing retain exact height queries. This avoids
+  synchronous detailed world generation solely to move a distant camera target.
+- tools/test_editor_retarget.py drives actual editor controls against copied saves
+  for both the slope case and zoomed-out pan/reversal/zoom-in/landing.
+- Unselected aerial cursor drawing reuses the resident surface sample instead of
+  generating exact terrain twice more during drawing. Retained foliage uses the
+  new editor target's LOD while replacement tiles are prepared.
+- Road drape caches use authoritative world positions and stable part identity.
+  Floating-origin shifts no longer invalidate their meshes or road foundations;
+  actual placement/foundation edits still invalidate the cache. Profiling scopes
+  world.georama.road_drape and world.georama.road_build expose this cost.
+- Validation: slope exit, rapid pan/reversal/zoom/exit and sustained flight pass.
+  The copied-save editor traversal builds 25 road meshes initially and zero after
+  travel begins, with no terrain edit invalidations caused by camera movement.
