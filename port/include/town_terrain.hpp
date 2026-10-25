@@ -5,7 +5,7 @@ class CBoxVu0;
 bool TownTerrainEnabled(const CEditGround *ground);
 void TownTerrainDraw(CEditGround *ground);
 void TownTerrainShutdown();
-int  TownTerrainPolys(CEditGround *ground, CCPoly *out, const CBoxVu0 &box);
+int  TownTerrainPolys(CEditGround *ground, CCPoly *out, const CBoxVu0 &box, int capacity = 380);
 
 // Keep editor-to-walk transitions on fully detailed, matching terrain.
 bool TownTerrainRequestWalk(float x,float z);

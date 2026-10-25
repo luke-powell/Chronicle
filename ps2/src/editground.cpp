@@ -1868,6 +1868,9 @@ int CEditGround::PickUpPoly(CCPoly *out_polygons, CBoxVu0 box, int flags) {
     }
 
     for (i = 0; i < 64; i++) {
+#ifdef PORT
+        if(i==0 && TownTerrainEnabled(this))continue;
+#endif
         if (fixed_parts[i].handle < 0) {
             continue;
         }
@@ -1884,9 +1887,6 @@ int CEditGround::PickUpPoly(CCPoly *out_polygons, CBoxVu0 box, int flags) {
         }
 
         found = frame->PickUpNearPoly(polygons, box);
-#ifdef PORT
-        if (i == 0 && TownTerrainEnabled(this)) found = 0;
-#endif
         polygons += found;
         count += found;
     }
@@ -1900,7 +1900,7 @@ int CEditGround::PickUpPoly(CCPoly *out_polygons, CBoxVu0 box, int flags) {
     }
 
 #ifdef PORT
-    count += TownTerrainPolys(this, out_polygons + count, box);
+    count += TownTerrainPolys(this, out_polygons + count, box, std::max(0, 368-count));
     if(TownTerrainEnabled(this))count+=WorldGeoramaPlatformPolys(this,out_polygons+count,box);
 #endif
     return count;
@@ -1949,6 +1949,9 @@ int CEditGround::PickUpCameraPoly(CCPoly *out_polygons, CBoxVu0 &box, int flags)
     }
 
     for (i = 0; i < 64 && (flags & 1); i++) {
+#ifdef PORT
+        if(i==0 && TownTerrainEnabled(this))continue;
+#endif
         if (fixed_parts[i].handle < 0) {
             continue;
         }
@@ -1964,9 +1967,6 @@ int CEditGround::PickUpCameraPoly(CCPoly *out_polygons, CBoxVu0 &box, int flags)
         }
 
         found = frame->PickUpNearPoly(polygons, box);
-#ifdef PORT
-        if (i == 0 && TownTerrainEnabled(this)) found = 0;
-#endif
         polygons += found;
         count += found;
     }
@@ -1980,7 +1980,7 @@ int CEditGround::PickUpCameraPoly(CCPoly *out_polygons, CBoxVu0 &box, int flags)
     }
 
 #ifdef PORT
-    count += TownTerrainPolys(this, out_polygons + count, box);
+    count += TownTerrainPolys(this, out_polygons + count, box, std::max(0, 400-count));
     if(TownTerrainEnabled(this))count+=WorldGeoramaPlatformPolys(this,out_polygons+count,box);
 #endif
     return count;

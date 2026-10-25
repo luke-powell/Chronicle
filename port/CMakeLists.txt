@@ -235,7 +235,7 @@ kz_port_sce_sources(DC_SCE_SOURCES LIBS libvu0 libpad libmc sifdev sifrpc eekern
 # Population caches follow generator content, not compiler timestamps. Renderer
 # and instrumentation edits must not regenerate continental forests.
 set(FOREST_KEY_INPUT "population-cache-v1")
-foreach(kernel terrain_kernel.hpp forest_kernel.hpp forest_disk_cache.hpp)
+foreach(kernel terrain_kernel.hpp canyon_kernel.hpp forest_kernel.hpp forest_disk_cache.hpp)
     set(kernel_path "${CMAKE_SOURCE_DIR}/port/include/${kernel}")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${kernel_path}")
     file(SHA256 "${kernel_path}" kernel_hash)

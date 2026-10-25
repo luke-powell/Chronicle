@@ -837,6 +837,7 @@ PORT_OVERRIDE int EdTalkMode(CCharacter *player, CCameraFollow *camera, int mode
 
 // Starts the event interpreter held by this translation unit.
 PORT_OVERRIDE int EdRunEvent(int program, CDataAlloc2<1> *arena) {
+    if(std::getenv("DC_CANYON_DIAG"))std::fprintf(stderr,"canyon program %d\n",program);
     return PortEdRunEvent(program, arena);
 }
 

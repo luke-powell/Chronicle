@@ -9,6 +9,7 @@
 #include <tuple>
 #include <vector>
 #include "shared_memo.hpp"
+#include "canyon_kernel.hpp"
 
 // Pure, global-coordinate terrain. No renderer, saves, or game assets required.
 namespace terrain {
@@ -387,6 +388,10 @@ inline Climate BaseClimateAt(double x, double z, double height) {
     c.soil = w.soil;
     // Water balance: heat/seasonality remove water; retentive soil holds it.
     c.moisture = std::clamp(w.rain + .14 * (w.soil - .5) - .2 * (c.temperature - .45) - .18 * w.season, 0., 1.);
+    auto district=canyon::At(x,z);
+    district.weight*=1-Smooth(1800,3500,height);
+    c.soil=std::lerp(c.soil,district.soil,district.weight);
+    c.moisture=std::lerp(c.moisture,.55+.16*district.soil-.18*district.wall,district.weight);
     c.aridity=Smooth(.10,.38,.46-c.moisture);
     return c;
 }
@@ -441,12 +446,12 @@ inline double VegetationDensity(double x, double z, const Climate &c, double foo
     double habitat=std::lerp(woodland+copses,dry,Smooth(.18,.65,c.sand));
     auto weathered=WeatheringAt(x,z);
     double exposed=std::max(weathered.bedrock,weathered.talus*.65);
-    return c.land*(1-c.snow)*habitat*(1-.95*exposed);
+    return canyon::FloraMask(x,z)*c.land*(1-c.snow)*habitat*(1-.95*exposed);
 }
 inline double UnderstoryDensity(double x,double z,const Climate &c) {
     double patch=Smooth(-.05,.45,ClimateNoise(x/320+18,z/320-73));
     auto weathered=WeatheringAt(x,z);
-    return c.land*(1-c.snow)*(1-Smooth(.12,.55,c.sand))*(.35+.45*c.forest)*(.25+.75*patch)*(1-std::max(weathered.bedrock,weathered.talus*.8));
+    return canyon::FloraMask(x,z)*c.land*(1-c.snow)*(1-Smooth(.12,.55,c.sand))*(.35+.45*c.forest)*(.25+.75*patch)*(1-std::max(weathered.bedrock,weathered.talus*.8));
 }
 
 // Climate-independent upper envelope of VegetationDensity. Forest fraction,
@@ -462,7 +467,7 @@ inline double VegetationDensityBound(double x,double z){
     double copses=.035*Smooth(.2,.6,ClimateNoise(wx/2200+21,wz/2200+33));
     double dry=.005+.019*Smooth(-.1,.5,ClimateNoise(wx/2600-15,wz/2600+42));
     auto weathered=WeatheringAt(x,z);
-    return std::max({woodland,copses,dry})*(1-.95*std::max(weathered.bedrock,weathered.talus*.65));
+    return canyon::FloraMask(x,z)*std::max({woodland,copses,dry})*(1-.95*std::max(weathered.bedrock,weathered.talus*.65));
 }
 
 inline std::array<double, 4> SpeciesWeights(const Climate &c) {
@@ -587,7 +592,7 @@ inline Oasis OasisAt(double x,double z) {
     if(o.radius && std::hypot(x-o.x,z-o.z)<o.radius*2.5)return o;
     return {};
 }
-inline double LandHeight(double x,double z) {
+inline double ContinentalLandHeight(double x,double z) {
     double h=DrylandHeight(x,z);
     if(std::hypot(x,z)<3000 || h<SeaLevel)return h;
     auto o=OasisAt(x,z);
@@ -596,6 +601,30 @@ inline double LandHeight(double x,double z) {
         h=std::lerp(h,std::min(h,o.water-24),1-Smooth(o.radius*.5,o.radius*1.7,d));
     }
     return h;
+}
+
+inline canyon::Sample CanyonLandform(double x,double z) {
+    auto sample=canyon::At(x,z);
+    if(sample.weight==0)return sample;
+    auto owner=canyon::Owner(x,z);
+    struct Region {int64_t x=0,z=0;double delta=0,weight=0;bool valid=false;};
+    static thread_local std::array<Region,256> regions;
+    auto &region=regions[Mix(uint64_t(owner.ix)^Mix(uint64_t(owner.iz)))&255];
+    if(!region.valid || region.x!=owner.ix || region.z!=owner.iz){
+        auto centre=canyon::Centre(owner);double base=ContinentalLandHeight(centre[0],centre[1]);
+        // Canyon districts belong to low sedimentary tablelands, never overwrite
+        // alpine ranges or manufacture islands from the ocean floor.
+        double suitability=(1-Smooth(1800,3500,base))*Smooth(SeaLevel,SeaLevel+150,base);
+        region={owner.ix,owner.iz,base-owner.elevation+canyon::Home().district.elevation,suitability,true};
+    }
+    sample.height+=region.delta;sample.water+=region.delta;sample.weight*=region.weight;
+    return sample;
+}
+inline double LandHeight(double x,double z) {
+    auto c=CanyonLandform(x,z);
+    if(c.weight>=1)return c.height;
+    double base=ContinentalLandHeight(x,z);
+    return std::lerp(base,c.height,c.weight);
 }
 
 inline DrainNode DrainPoint(int64_t x, int64_t z) {
@@ -1027,6 +1056,12 @@ inline const std::vector<DrainKey> &RiverCandidates(int64_t cx, int64_t cz) {
 }
 
 inline RiverSample RiverAt(double x, double z, double surface = -1e30) {
+    auto canyonSample=CanyonLandform(x,z);
+    if(canyonSample.weight>=1){
+        double wet=canyonSample.width>0?1-Smooth(canyonSample.width+10,canyonSample.width+100,canyonSample.channel):0;
+        return {canyonSample.channel,canyonSample.water,canyonSample.width,false,wet};
+    }
+
     RiverSample result;
     if (std::hypot(x, z) < 3000 || LandHeight(x,z)<SeaLevel-100) {
         return result;
@@ -1063,6 +1098,7 @@ inline RiverSample RiverAt(double x, double z, double surface = -1e30) {
             }
         }
     }
+    result.width*=1-canyonSample.weight;result.riparian*=1-canyonSample.weight;
     return result;
 }
 
@@ -1079,6 +1115,8 @@ inline Climate ClimateAt(double x, double z, double height, double footprint) {
 
 inline double NaturalHeightUncached(double x, double z, double spacing) {
     double base = LandHeight(x, z);
+    double canyonWeight=CanyonLandform(x,z).weight;
+    if(canyonWeight>=1)return base; // already carved once by its own drainage
     if (spacing >= 512 || base < SeaLevel-100) {
         return base;
     }
@@ -1086,7 +1124,7 @@ inline double NaturalHeightUncached(double x, double z, double spacing) {
         return base;
     }
     auto   river = RiverAt(x, z);
-    double influence = (1 - Smooth(river.width + 64, river.width + 220, river.distance)) * Smooth(3000, 4500, std::hypot(x, z)) * (1 - Smooth(64, 512, spacing));
+    double influence = (1-canyonWeight) * (1 - Smooth(river.width + 64, river.width + 220, river.distance)) * Smooth(3000, 4500, std::hypot(x, z)) * (1 - Smooth(64, 512, spacing));
     double bed = river.water - 22 + 16 * Smooth(0, river.width, river.distance);
     return std::lerp(base, std::min(base, bed), influence);
 }

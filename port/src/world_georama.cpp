@@ -35,21 +35,26 @@ static unsigned        foundationRevision = 0;
 static constexpr int   MayorHouse = 22, MayorPlatform = 23;
 static constexpr float PlatformTop = 47.424f;
 
-bool WorldGeoramaCustom(CEditGround *ground, int plot) { return TownTerrainEnabled(ground) && (plot == MayorHouse || plot == MayorPlatform); }
+bool WorldGeoramaCustom(CEditGround *ground, int plot) { return TownTerrainEnabled(ground) && plot == MayorHouse; }
 
 void WorldGeoramaRegister(CSaveData *save, CEditGround *ground) {
     if (!TownTerrainEnabled(ground)) {
         return;
     }
     world::Reset();
-    WorldGeoramaBuildPlatform(ground);
+    // Preserve the original platform and stairs; retire only its synthetic copy.
+    int oldCount=0;auto *oldParts=save->GetParts(0,&oldCount);int kept=0;
+    for(int i=0;i<oldCount;i++)if(oldParts[i].part_id!=MayorPlatform)oldParts[kept++]=oldParts[i];
+    if(oldParts&&kept<130)oldParts[kept].part_id=-1;
+    save->GetEditPartsInfo(0,MayorPlatform)->obtained=0;
+    save->GetEditPartsInfo(0,MayorPlatform)->stock=0;
     terrain::Foundations().clear();
     terrain::Roads().clear();
     ++foundationRevision;
-    bool                      migrate = !save->GetEditPartsInfo(0, MayorPlatform)->obtained;
+    bool                      migrate = !save->GetEditPartsInfo(0, MayorHouse)->obtained;
     static EPARTS_INFO_HEADER headers[2];
     static unsigned char      cells[2][49];
-    for (int k = 0; k < 2; k++) {
+    for (int k = 0; k < 1; k++) {
         int   plot = MayorHouse + k;
         auto &def = EditPartsData[0].parts[plot];
         def = {};
@@ -96,10 +101,9 @@ void WorldGeoramaRegister(CSaveData *save, CEditGround *ground) {
         p.SetRotY(0);
         p.SetPosition(0, 0, 0);
         p.draw_distance = 0;
-        if (k) WorldGeoramaOffsetPlatform(p);
         ground->fixed_parts[5 + k].draw_on = 0;
         // Keep fixed house as the event-system anchor, but collision belongs to
-        // its movable copy. The platform's old stairs are drawn with the new piece.
+        // its movable copy. The original platform and stairs remain fixed.
         ground->fixed_parts[5 + k].collision_frame = nullptr;
         ground->fixed_parts[5 + k].camera_frame = nullptr;
         auto *saved = save->GetEditPartsInfo(0, plot);
@@ -111,7 +115,6 @@ void WorldGeoramaRegister(CSaveData *save, CEditGround *ground) {
         int   count;
         auto *parts = save->GetParts(0, &count);
         if (count <= 126) {
-            parts[count++] = {MayorPlatform, 0, 0, 0, 700};
             parts[count++] = {MayorHouse, 0, 0, PlatformTop, 792.740f};
             parts[count].part_id = -1;
         }
@@ -734,15 +737,10 @@ void WorldGeoramaTest(CEditGround *ground) {
     check(house >= 0 && ground->parts[house].parts_no == MayorHouse, "legacy mayor house migrated");
     int housePlot, houseRotation;
     check(WorldGeoramaDelete(ground, &housePlot, &houseRotation, 0, 792.74f) >= 0, "pick up mayor house");
-    int platformPlot, platformRotation;
-    check(WorldGeoramaDelete(ground, &platformPlot, &platformRotation, 250, 700) >= 0, "pick up independent platform");
-    check(WorldGeoramaPlace(ground, MayorPlatform, 6001, 5001, 1) >= 0, "place rotated platform");
-    int platform = WorldGeoramaFind(ground, 6050, 5000);
-    check(platform >= 0 && ground->parts[platform].parts_no == MayorPlatform, "find moved platform");
-    auto &support = ground->parts[platform];
-    int   movedHouse = WorldGeoramaPlace(ground, MayorHouse, 6151, 5001, 1);
-    check(movedHouse >= 0, "place house on platform");
-    check(std::abs(ground->parts[movedHouse].pos[1] - support.pos[1] - PlatformTop) < .01, "house rests on support");
+    check(ground->fixed_parts[6].draw_on!=0 && std::abs(ground->fixed_parts[6].pos[2]-599.65f)<.01,"retail stairs preserved");
+    check(WorldGeoramaFind(ground,250,700)<0,"platform is not a movable replacement");
+    int movedHouse=WorldGeoramaPlace(ground,MayorHouse,6151,5001,1);
+    check(movedHouse>=0,"mayor house remains movable");
     float houseY = ground->parts[movedHouse].pos[1];
     ground->Save(0, saved.get());
     ground->parts_info->Save(0, saved.get());
@@ -753,6 +751,6 @@ void WorldGeoramaTest(CEditGround *ground) {
     ED_EVENT_PARAM door{};
     check(EdSearchEvent(&door, const_cast<char *>("i01h06"), 0, NowTime) != 0, "mayor entrance exists");
     check(door.parts_no == MayorHouse && std::abs(door.position[0] - ground->parts[movedHouse].pos[0]) < 150 && std::abs(door.position[2] - ground->parts[movedHouse].pos[2]) < 150, "door follows moved house");
-    std::fprintf(stderr, "georama TEST PASS: independent mayor pieces, support, rotation and save/load\n");
+    std::fprintf(stderr, "georama TEST PASS: original fixed platform and stairs, movable mayor house, door, rotation and save/load\n");
     std::fprintf(stderr, "georama TEST PASS: remote place, rotate, select, overlap, delete, native save/load, foundation\n");
 }

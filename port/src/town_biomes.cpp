@@ -196,7 +196,7 @@ void LoadTextures(const char *town) {
                             level.pixels.resize(size_t(level.width) * level.height * (decoded->format == gfx::TextureFormat::Index8 ? 1 : 4));
                         }
                     }
-                    if (key=="e01/e01b01" || key=="e01/e01b06" || key=="e02/e02b21" || key=="e02/e02b02" || key=="e04/e04b01" || key=="e03/e03b03") {
+                    if (key=="e01/e01b01" || key=="e01/e01b05" || key=="e01/e01b06" || key=="e02/e02b21" || key=="e02/e02b02" || key=="e04/e04b01" || key=="e03/e03b03") {
                         gfx::tim2::Image surface;
                         gfx::tim2::Level base;
                         base.width=level.width;base.height=level.height;
@@ -540,6 +540,7 @@ void BiomePrepare(CEditGround *ground) {
             }
         }
         requiredTextures["e01/e01b06"]=true;
+        requiredTextures["e01/e01b05"]=true;
         for(int lod=0;lod<3;++lod)for(int species=0;species<7;++species)for(const auto &src:treeLods[lod][species]){
             auto mesh=PrepareMesh({},src.indices,src.texture);
             mesh.mesh=gfx::CreateMesh(src.vertices,src.indices);mesh.indices.clear();
@@ -703,6 +704,8 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
         double grassCover=(1-terrain::Smooth(.12,.55,climate.sand))*(1-climate.snow)*climate.land;
         grassCover*=std::clamp(.65+climate.forest*.7,0.,1.);
         double weights[] = {grassCover * fade * soil, climate.sand * fade * soil, bank * soil};
+        double nativeGround=terrain::CanyonLandform(x,z).weight;
+        for(auto &weight:weights)weight*=1-nativeGround;
         for (int i = 0; i < 3; i++) {
             auto p = v;
             p.color[3] = uint8_t(128 * weights[i]);
@@ -880,6 +883,7 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
             double x=(ix+.12+.76*double(seed&65535)/65535)*spacing;
             double z=(iz+.12+.76*double((seed>>16)&65535)/65535)*spacing;
             if(x<t.left()||x>=t.left()+t.size()||z<t.top()||z>=t.top()+t.size()||std::hypot(x,z)<2200||Occupied(x,z))continue;
+            if(canyon::FloraMask(x,z)==0)continue;
             // Ecology shares the ring's spatial sample grid, just like the
             // supporting surface. Do not regenerate drainage and weathering
             // for thousands of individual ten-unit grass candidates.

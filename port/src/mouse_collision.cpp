@@ -1,4 +1,5 @@
 #include "mouse_collision.hpp"
+#include "town_terrain.hpp"
 
 #include <algorithm>
 #include <array>
@@ -275,6 +276,7 @@ int MouseCameraPolys(CEditGround &ground, CBoxVu0 &box, int mask, std::vector<CC
     }
     if (mask & 1) {
         for (auto &p : ground.fixed_parts) {
+            if(&p==&ground.fixed_parts[0] && TownTerrainEnabled(&ground))continue;
             if (!part(p)) {
                 return -1;
             }
@@ -304,6 +306,10 @@ int MouseCameraPolys(CEditGround &ground, CBoxVu0 &box, int mask, std::vector<CC
             }
             polys.resize(start + found);
         }
+    }
+    if(TownTerrainEnabled(&ground)){
+        auto start=polys.size();int capacity=kPolyBudget-int(start);polys.resize(kPolyBudget);
+        int n=TownTerrainPolys(&ground,polys.data()+start,box,capacity);polys.resize(start+n);
     }
     return static_cast<int>(polys.size());
 }
