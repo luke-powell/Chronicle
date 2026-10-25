@@ -6,6 +6,7 @@ Report world-unit measurements rather than assuming a physical metre scale.
 """
 from pathlib import Path
 import json
+import sys
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -103,3 +104,16 @@ fig.suptitle('Actual rendered wall meshes — native Norune vs procedural canyon
 fig.savefig(OUT/'distributions.png', dpi=150)
 (OUT/'metrics.json').write_text(json.dumps(report, indent=2))
 print(json.dumps(report, indent=2))
+if '--check' in sys.argv:
+    for band, samples in report['samples'].items():
+        native, generated = samples['Native Norune'], samples['Generated canyon']
+        # Allow contour intersections / the town transition, but reject the
+        # old 24–88x density and stretched steep-wall triangle distribution.
+        ratio = generated['triangles_per_10000_square_world_units']/native['triangles_per_10000_square_world_units']
+        assert ratio < 2, (band, 'excessive density', ratio)
+        assert generated['triangle_quality_equilateral_is_one']['median'] > .6, (band, 'thin triangles')
+        edge_ratio=generated['edge_length']['median']/native['edge_length']['median']
+        assert .5 < edge_ratio < 1.5, (band, 'wrong polygon scale', edge_ratio)
+        assert generated['adjacent_face_angle_degrees']['p90'] < 45, (band, 'jagged faces')
+        assert abs(native['area_weighted_mean_slope_degrees']-generated['area_weighted_mean_slope_degrees']) < 12, (band, 'wrong slope')
+    print('PASS native-relative density, triangle shape, face angles and wall slopes')

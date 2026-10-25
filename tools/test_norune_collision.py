@@ -1,6 +1,6 @@
 ﻿"""Real rendered terrain, gate traversal, native join and cliff-top collision."""
 import re, shutil
-from test_town_combat import run, OUT
+from test_town_combat import run, OUT, ROOT
 cases=[
  ('gate','-700,-350,1.5707963','-600,-350,-1000,16,-350',180,150),
  ('turn','-900,-320,0','-900,-320,-900,16,0',180,170),
@@ -12,7 +12,8 @@ cases=[
 for name,site,camera,frames,stop in cases:
  log=run('norune-style','edit:0',frames,f'0\n40 128 0 128 128\n{stop}\n',{
   'DC_WORLD_PREVIEW_SITE':site,'DC_WORLD_PREVIEW_GROUND_CAMERA':camera,
-  'DC_TOWN_WALK_TRACE':'1','DC_CANYON_DIAG':'1','DC_CANYON_COLLISION_TEST':'1'},timeout=600)
+  'DC_TOWN_WALK_TRACE':'1','DC_CANYON_DIAG':'1','DC_CANYON_COLLISION_TEST':'1',
+  **({'DC_TERRAIN_MESH_OBJ':str(ROOT/'port/build/canyon-rendered.obj')} if name=='bend' else {})},timeout=600)
  points=[tuple(map(float,p)) for p in re.findall(r'town walk: ([-\d.]+) ([-\d.]+) ([-\d.]+)',log)]
  assert points, name
  assert '0 mismatches' in log, name

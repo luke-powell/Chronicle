@@ -17,7 +17,7 @@ struct Point {double x,z;};
 inline double Segment(Point p,Point a,Point b){double x=b.x-a.x,z=b.z-a.z;double t=std::clamp(((p.x-a.x)*x+(p.z-a.z)*z)/(x*x+z*z),0.,1.);return std::hypot(p.x-a.x-t*x,p.z-a.z-t*z);}
 template<size_t N> inline double Path(Point p,const std::array<Point,N>&points){double d=1e30;for(size_t i=1;i<N;++i)d=std::min(d,Segment(p,points[i-1],points[i]));return d;}
 // Match the retail western opening, including its dogleg inside the cliff.
-inline constexpr std::array<Point,6> Exit={Point{-700,-350},{-855,-350},{-925,-150},{-1200,-150},{-1500,-150},{-2000,-150}};
+inline constexpr std::array<Point,6> Exit={Point{-700,-350},{-855,-350},{-925,-150},{-1141.54,-139.68},{-1500,-150},{-2000,-150}};
 // Branches share approach tangents, rather than attaching as perpendicular T's.
 inline const std::vector<std::vector<Point>> &Routes(){
  static const std::vector<std::vector<Point>> routes={
@@ -53,13 +53,13 @@ struct Network {
    for(int k=0;k<steps;k++){
     Line l{at(double(k)/steps),at(double(k+1)/steps)};int id=int(lines.size());lines.push_back(l);
     auto cell=[](double v){return std::clamp(int(std::floor((v-Min)/Bin)),0,Side-1);};
-    for(int z=cell(std::min(l.a.z,l.b.z)-210);z<=cell(std::max(l.a.z,l.b.z)+210);z++)for(int x=cell(std::min(l.a.x,l.b.x)-210);x<=cell(std::max(l.a.x,l.b.x)+210);x++)bins[z*Side+x].push_back(id);
+    for(int z=cell(std::min(l.a.z,l.b.z)-400);z<=cell(std::max(l.a.z,l.b.z)+400);z++)for(int x=cell(std::min(l.a.x,l.b.x)-400);x<=cell(std::max(l.a.x,l.b.x)+400);x++)bins[z*Side+x].push_back(id);
    }
   }
  }
  double distance(Point p)const{
-  int x=int(std::floor((p.x-Min)/Bin)),z=int(std::floor((p.z-Min)/Bin));if(x<0||z<0||x>=Side||z>=Side)return 205;
-  double result=205;for(int id:bins[z*Side+x])result=std::min(result,Segment(p,lines[id].a,lines[id].b));return result;
+  int x=int(std::floor((p.x-Min)/Bin)),z=int(std::floor((p.z-Min)/Bin));if(x<0||z<0||x>=Side||z>=Side)return 400;
+  double result=400;for(int id:bins[z*Side+x])result=std::min(result,Segment(p,lines[id].a,lines[id].b));return result;
  }
 };
 inline const Network &Corridors(){static const Network n;return n;}
@@ -73,6 +73,59 @@ inline District Generate(int64_t ix,int64_t iz){return {ix,iz,Hash(uint64_t(ix)^
 struct Site{District district=Generate(0,0);};
 inline const Site &Home(){static const Site site;return site;}
 inline District Owner(double x,double z){return Generate(int64_t(std::floor(x/CellSize+.5)),int64_t(std::floor(z/CellSize+.5)));}
+// A contour-aligned mesh uses these same piecewise planar distance samples.
+// Interpolating height instead would round off the shoulder and stretch grid
+// triangles over the entire cliff. Keep the sampling lattice global across tiles.
+constexpr double FacetSize=128;
+inline double RawDistance(double x,double z){
+ auto d=Owner(x,z);double u=x-d.x,v=z-d.z;
+ double warp=Smooth(1800,2800,std::hypot(u,v));
+ return Corridors().distance({u+warp*80*std::sin(v/510+Unit(d.seed)*6),v+warp*60*std::sin(u/630+Unit(d.seed+1)*6)});
+}
+inline double FacetSample(double px,double pz){
+   struct Entry{int64_t x=0,z=0;double distance=0;bool valid=false;};
+   static thread_local std::array<Entry,4096> cache;
+   int64_t ix=int64_t(std::floor(px/FacetSize)),iz=int64_t(std::floor(pz/FacetSize));
+   auto &entry=cache[Hash(uint64_t(ix)^Hash(uint64_t(iz)))&(cache.size()-1)];
+   if(!entry.valid||entry.x!=ix||entry.z!=iz)entry={ix,iz,RawDistance(px,pz),true};
+   return entry.distance;
+}
+inline bool FacetFlip(double x,double z){
+ double sx=std::floor(x/FacetSize)*FacetSize,sz=std::floor(z/FacetSize)*FacetSize;
+ return FacetSample(sx,sz)+FacetSample(sx+FacetSize,sz+FacetSize)
+     <FacetSample(sx+FacetSize,sz)+FacetSample(sx,sz+FacetSize);
+}
+inline double FacetDistance(double x,double z){
+ double sx=std::floor(x/FacetSize)*FacetSize,sz=std::floor(z/FacetSize)*FacetSize;
+ double u=(x-sx)/FacetSize,v=(z-sz)/FacetSize;
+ double a=FacetSample(sx,sz),b=FacetSample(sx+FacetSize,sz),c=FacetSample(sx,sz+FacetSize),d=FacetSample(sx+FacetSize,sz+FacetSize);
+ // Follow the channel, rather than bridging diagonally across it. A fixed
+ // diagonal can turn a narrow diagonal corridor into a 100-unit-high dam.
+ if(a+d<b+c)return u>=v?a*(1-u)+b*(u-v)+d*v:a*(1-v)+c*(v-u)+d*u;
+ return u+v<=1 ? a*(1-u-v)+b*u+c*v : b*(1-v)+c*(1-u)+d*(u+v-1);
+}
+inline double Profile(double distance){
+ return 105*std::clamp((distance-65)/17.,0.,1.)+95*std::clamp((distance-82)/123.,0.,1.);
+}
+inline double WallDistance(double x,double z){
+ auto owner=Owner(x,z);double r=std::hypot(x,z),distance=FacetDistance(x,z);
+ if(owner.ix==0&&owner.iz==0&&r<1950){
+   double width=std::lerp(47.,65.,Smooth(1200,1750,r));
+   distance=std::lerp(Path({x,z},Exit)+65-width,distance,Smooth(1700,1950,r));
+ }
+ return distance;
+}
+inline std::array<float,3> FloorNormal(double x,double z){
+ // Retail shares floor vertices with the walls, so these endpoint normals
+ // are tilted. Continue its interpolated lighting across the actual exit edge,
+ // then return smoothly to an upward normal over the next 30 metres.
+ double t=std::clamp((z+186.24)/93.1201,0.,1.);
+ double edgeX=std::lerp(-1140.72,-1142.36,t);
+ double blend=Smooth(0,300,edgeX-x);
+ return {float(std::lerp(std::lerp(.033013,-.450063,t),0.,blend)),
+         float(std::lerp(std::lerp(.697421,.712994,t),1.,blend)),
+         float(std::lerp(std::lerp(.715901,-.537664,t),0.,blend))};
+}
 inline std::array<double,2> Centre(const District &d){return {d.x,d.z};}
 struct Sample {double height=0,weight=0,wall=0,channel=1e9,water=0,width=0,soil=.65;};
 // Authored cliff heights are sampled once from the original meshes, before
@@ -81,6 +134,15 @@ struct Sample {double height=0,weight=0,wall=0,channel=1e9,water=0,width=0,soil=
 constexpr int ShellAngles=512,ShellRadii=257;
 struct Shell {std::array<float,ShellAngles*ShellRadii> heights{};std::array<float,ShellAngles> ridge{};bool ready=false;};
 inline Shell &TownShell(){static Shell s;return s;}
+inline void RestoreShellRidges(){
+ auto &s=TownShell();
+ for(int a=0;a<ShellAngles;a++){
+   double top=0;s.ridge[a]=0;
+   for(int r=0;r<ShellRadii;r++)if(s.heights[a*ShellRadii+r]>top){top=s.heights[a*ShellRadii+r];s.ridge[a]=float(r*8);}
+   if(s.ridge[a]<700)s.ridge[a]=1200;
+ }
+ s.ready=true;
+}
 inline double RidgeRadius(double x,double z){
  const auto &s=TownShell();if(!s.ready)return 1100;
  double a=std::atan2(z,x)*ShellAngles/6.283185307179586;if(a<0)a+=ShellAngles;
@@ -100,17 +162,22 @@ inline Sample At(double x,double z){
  double weight=1-Smooth(-1200,1200,Outline(u,v,d.seed));
  if(weight==0)return {};
  // Each district has the same scale, with seeded bends away from the town.
- double warp=Smooth(1800,2800,std::hypot(u,v));
- Point p{u+warp*80*std::sin(v/510+Unit(d.seed)*6),v+warp*60*std::sin(u/630+Unit(d.seed+1)*6)};
- double distance=Corridors().distance(p);
- double height=105*Smooth(65,82,distance)+95*Smooth(82,205,distance);
+ double distance=WallDistance(x,z);
+ double height=Profile(distance);
  double face=height/WallHeight;
  if(d.ix==0&&d.iz==0){
-   double shell=ShellHeight(x,z);
+   double native=ShellHeight(x,z),ridge=RidgeRadius(x,z);
    // Preserve the native ground and wall profile; the connector starts at
    // the actual west exit, not in a newly cut hole on another side.
-   shell=std::min(shell,WallHeight*Smooth(42,90,Path({x,z},Exit)));
-   height=std::lerp(shell,height,Smooth(1400,1950,r));
+   double distance=Path({x,z},Exit);
+   double shell=std::min(native,WallHeight*Smooth(42,90,distance));
+   double connector=height;
+   // The radial native raster is a join reference, not a wall generator:
+   // extending it produces a corrugated skirt at the cliff foot. Finish the
+   // blend beneath the retained native mesh, then use one clean cross-section.
+   connector+=(native-WallHeight)*Smooth(105,200,connector)*(1-Smooth(ridge,ridge+300,r));
+   shell=std::lerp(shell,connector,Smooth(ridge-160,ridge,r));
+   height=shell;
    if(x>=-700&&x<=700&&z>=-700&&z<=500)height=0;
  }
  return {height,weight,face,1e9,0,0,.65};

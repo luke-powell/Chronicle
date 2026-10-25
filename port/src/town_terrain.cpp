@@ -161,9 +161,11 @@ void Prepare(CEditGround *ground) {
                 auto *visual=static_cast<CVisualPolyVu1 *>(static_cast<CFrameVu1 *>(f)->visual);
                 auto *source=visual?Draw3DFindVisual(visual->vu_data):nullptr;
                 if(source){obj<<"o "<<f->name<<'\n';
+                    obj<<"# vertex_colour "<<source->vertex_colour<<'\n';
                     for(auto &v:source->vertices)obj<<"v "<<v.position[0]<<' '<<v.position[1]<<' '<<v.position[2]<<'\n';
                     for(auto &v:source->vertices)obj<<"vt "<<v.uv[0]<<' '<<v.uv[1]<<'\n';
-                    for(auto &s:source->strips){obj<<"usemtl "<<s.texture_name<<'\n';for(unsigned i=s.first_index;i+2<s.first_index+s.index_count;i+=3)obj<<"f "<<offset+source->indices[i]<<' '<<offset+source->indices[i+1]<<' '<<offset+source->indices[i+2]<<'\n';}
+                    for(auto &v:source->vertices)obj<<"vn "<<v.normal[0]<<' '<<v.normal[1]<<' '<<v.normal[2]<<'\n';
+                    for(auto &s:source->strips){obj<<"# diffuse "<<s.diffuse[0]<<' '<<s.diffuse[1]<<' '<<s.diffuse[2]<<'\n';obj<<"usemtl "<<s.texture_name<<'\n';for(unsigned i=s.first_index;i+2<s.first_index+s.index_count;i+=3)obj<<"f "<<offset+source->indices[i]<<' '<<offset+source->indices[i+1]<<' '<<offset+source->indices[i+2]<<'\n';}
                     offset+=source->vertices.size();
                 }self(self,f->child);
             }
@@ -302,7 +304,10 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
     for (int z = 0; z < n; z++) {
         for (int x = 0; x < n; x++) {
             unsigned a = z * (n + 1) + x, b = a + 1, c = a + n + 1, d = c + 1;
-            indices.insert(indices.end(), {a, c, b, b, c, d});
+            double wx=t.left()+(x+.5)*step,wz=t.top()+(z+.5)*step;
+            if(t.level<=1&&terrain::CanyonLandform(wx,wz).weight>.999999&&canyon::FacetFlip(wx,wz))
+                indices.insert(indices.end(),{a,c,d,a,d,b});
+            else indices.insert(indices.end(), {a, c, b, b, c, d});
         }
     }
     Chunk result;
@@ -313,61 +318,82 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
     if(std::getenv("DC_TERRAIN_BUILD_PROFILE"))std::fprintf(stderr,"terrain build: level %d terrain %.3f biome %.3f\n",t.level,
         std::chrono::duration<double,std::milli>(terrainDone-started).count(),
         std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-terrainDone).count());
-    // Resolve the 17-unit lower cliff face without increasing resolution on
-    // flat floors/plateaus or on distant tiles. Shared edge decisions keep
-    // adjacent triangles watertight; coarse LOD borders retain their stitch.
+    bool contourTile=t.level<=1;
+    for(int z=0;z<=n&&contourTile;z++)for(int x=0;x<=n;x++){
+        double wx=t.left()+x*step,wz=t.top()+z*step;
+        if(std::hypot(wx,wz)<1950 || terrain::CanyonLandform(wx,wz).weight<.999999
+            || std::abs(terrain::Height(wx,wz,step)-terrain::LandHeight(wx,wz))>.01){contourTile=false;break;}
+    }
+    // Cut triangles at the floor, shoulder and plateau contours. Between cuts
+    // the shared distance field and profile are affine, so broad triangles
+    // represent the surface exactly, rather than stretching tiny grid faces.
     if(t.level<=1){
-        auto sampleVertex=[&](gfx::Vertex3D v){
-            double wx=t.left()+v.position[0],wz=t.top()+v.position[2];
-            double h=terrain::Height(wx,wz,step);
-            v.position[1]=float(h)-.04f;
-            constexpr double delta=4;
-            double nx=terrain::Height(wx-delta,wz,step)-terrain::Height(wx+delta,wz,step);
-            double nz=terrain::Height(wx,wz-delta,step)-terrain::Height(wx,wz+delta,step);
-            double len=std::sqrt(nx*nx+64+nz*nz);
-            v.normal[0]=float(nx/len);v.normal[1]=float(8/len);v.normal[2]=float(nz/len);
-            v.color[3]=uint8_t(128*terrain::RockExposure(wx,wz,h,8/len));
-            return v;
-        };
-        for(auto &v:vertices){
-            if(terrain::CanyonLandform(t.left()+v.position[0],t.top()+v.position[2]).weight>.95){
-                auto sampled=sampleVertex(v);std::copy_n(sampled.normal,3,v.normal);v.color[3]=sampled.color[3];
+        if(contourTile){
+            indices.clear();
+            const int stride=std::max(1,int(canyon::FacetSize/step));
+            for(int z=0;z<n;z+=stride)for(int x=0;x<n;x+=stride){
+                unsigned a=z*(n+1)+x,b=a+stride,c=a+stride*(n+1),d=c+stride;
+                if(canyon::FacetFlip(t.left()+(x+stride*.5)*step,t.top()+(z+stride*.5)*step))
+                    indices.insert(indices.end(),{a,c,d,a,d,b});
+                else indices.insert(indices.end(),{a,c,b,b,c,d});
             }
         }
-        for(int pass=0;pass<2;pass++){
-            std::map<std::pair<unsigned,unsigned>,int> splits;
-            auto midpoint=[&](unsigned a,unsigned b){
-                auto key=std::minmax(a,b);std::pair<unsigned,unsigned> edge{key.first,key.second};
-                if(auto it=splits.find(edge);it!=splits.end())return it->second;
-                auto &va=vertices[a];auto &vb=vertices[b];
-                double x=(va.position[0]+vb.position[0])*.5,z=(va.position[2]+vb.position[2])*.5;
-                bool border=(va.position[0]==0&&vb.position[0]==0&&edges[0]>t.level)
-                    ||(va.position[0]==t.size()&&vb.position[0]==t.size()&&edges[1]>t.level)
-                    ||(va.position[2]==0&&vb.position[2]==0&&edges[2]>t.level)
-                    ||(va.position[2]==t.size()&&vb.position[2]==t.size()&&edges[3]>t.level);
-                double wx=t.left()+x,wz=t.top()+z;auto c=terrain::CanyonLandform(wx,wz);
-                int id=-1;
-                if(!border&&c.weight>.95){
-                    double h=canyon::At(wx,wz).height;
-                    bool face=h>1&&h<199;
-                    bool crosses=std::abs(va.position[1]-vb.position[1])>3 || std::abs((va.position[1]+vb.position[1])*.5+.04-h)>2;
-                    if(face||crosses){
-                        auto v=va;for(int k=0;k<3;k++)v.position[k]=(va.position[k]+vb.position[k])*.5f;
-                        for(int k=0;k<2;k++)v.uv[k]=(va.uv[k]+vb.uv[k])*.5f;
-                        v=sampleVertex(v);id=int(vertices.size());vertices.push_back(v);v.color[3]=0;snowVertices.push_back(v);
+        struct ContourVertex {gfx::Vertex3D v;double distance;};
+        auto previous=std::move(indices);indices.clear();
+        constexpr double cuts[]={-1e30,65,82,205,1e30};
+        for(size_t i=0;i+2<previous.size();i+=3){
+            std::vector<ContourVertex> tri;
+            bool eligible=true;
+            for(int k=0;k<3;k++){
+                auto v=vertices[previous[i+k]];double wx=t.left()+v.position[0],wz=t.top()+v.position[2];
+                eligible &= terrain::CanyonLandform(wx,wz).weight>.999999
+                    && std::abs(terrain::Height(wx,wz,step)-terrain::LandHeight(wx,wz))<.01;
+                tri.push_back({v,canyon::WallDistance(wx,wz)});
+            }
+            if(!eligible){indices.insert(indices.end(),previous.begin()+i,previous.begin()+i+3);continue;}
+            auto clip=[](const std::vector<ContourVertex>&input,double cut,bool above){
+                std::vector<ContourVertex> out;
+                for(size_t k=0;k<input.size();k++){
+                    auto a=input[k],b=input[(k+1)%input.size()];
+                    bool ai=above?a.distance>=cut:a.distance<=cut,bi=above?b.distance>=cut:b.distance<=cut;
+                    if(ai)out.push_back(a);
+                    if(ai!=bi){
+                        double f=(cut-a.distance)/(b.distance-a.distance);auto v=a;
+                        for(int j=0;j<3;j++)v.v.position[j]=float(std::lerp(double(a.v.position[j]),double(b.v.position[j]),f));
+                        for(int j=0;j<2;j++)v.v.uv[j]=float(std::lerp(double(a.v.uv[j]),double(b.v.uv[j]),f));
+                        v.distance=cut;out.push_back(v);
                     }
                 }
-                splits.emplace(edge,id);return id;
+                return out;
             };
-            auto previous=std::move(indices);indices.clear();
-            for(size_t i=0;i+2<previous.size();i+=3){
-                unsigned a=previous[i],b=previous[i+1],c=previous[i+2];int ab=midpoint(a,b),bc=midpoint(b,c),ca=midpoint(c,a);
-                if(ab<0&&bc<0&&ca<0){indices.insert(indices.end(),{a,b,c});continue;}
-                if(ab>=0&&bc>=0&&ca>=0){indices.insert(indices.end(),{a,unsigned(ab),unsigned(ca),unsigned(ab),b,unsigned(bc),unsigned(ca),unsigned(bc),c,unsigned(ab),unsigned(bc),unsigned(ca)});continue;}
-                std::vector<unsigned> ring{a};if(ab>=0)ring.push_back(ab);ring.push_back(b);if(bc>=0)ring.push_back(bc);ring.push_back(c);if(ca>=0)ring.push_back(ca);
-                auto v=vertices[a];for(int k=0;k<3;k++)v.position[k]=(vertices[a].position[k]+vertices[b].position[k]+vertices[c].position[k])/3;
-                v=sampleVertex(v);unsigned centre=unsigned(vertices.size());vertices.push_back(v);v.color[3]=0;snowVertices.push_back(v);
-                for(size_t k=0;k<ring.size();k++)indices.insert(indices.end(),{centre,ring[k],ring[(k+1)%ring.size()]});
+            for(int band=0;band<4;band++){
+                auto polygon=clip(clip(tri,cuts[band],true),cuts[band+1],false);
+                if(polygon.size()<3)continue;
+                unsigned start=unsigned(vertices.size());
+                for(auto p:polygon){
+                    auto v=p.v;double wx=t.left()+v.position[0],wz=t.top()+v.position[2];
+                    double h=terrain::Height(wx,wz,step);
+                    v.position[1]=float(h)-.04f;
+                    // A stitched border follows the actual coarser edge, even
+                    // where a new contour vertex lands between its endpoints.
+                    if(v.position[0]==0&&edges[0]>t.level)v.position[1]=float(terrain::EdgeHeight(wx,wz,edges[0],false))-.04f;
+                    if(v.position[0]==t.size()&&edges[1]>t.level)v.position[1]=float(terrain::EdgeHeight(wx,wz,edges[1],false))-.04f;
+                    if(v.position[2]==0&&edges[2]>t.level)v.position[1]=float(terrain::EdgeHeight(wx,wz,edges[2],true))-.04f;
+                    if(v.position[2]==t.size()&&edges[3]>t.level)v.position[1]=float(terrain::EdgeHeight(wx,wz,edges[3],true))-.04f;
+                    // Keep the shoulder hard but smooth normals along each
+                    // contour. Never average the floor normal into the wall.
+                    double gradient=band==1?105./17:band==2?95./123:0;
+                    double nx=(canyon::WallDistance(wx-24,wz)-canyon::WallDistance(wx+24,wz))*gradient;
+                    double nz=(canyon::WallDistance(wx,wz-24)-canyon::WallDistance(wx,wz+24))*gradient;
+                    double length=std::sqrt(nx*nx+48*48+nz*nz);
+                    v.normal[0]=float(nx/length);v.normal[1]=float(48/length);v.normal[2]=float(nz/length);
+                    if(band==0&&wx<-1000&&wx>-1500&&wz>-250&&wz<-50){
+                        auto normal=canyon::FloorNormal(wx,wz);std::copy_n(normal.data(),3,v.normal);
+                    }
+                    v.color[3]=band==1?128:0;
+                    vertices.push_back(v);v.color[3]=0;snowVertices.push_back(v);
+                }
+                for(unsigned k=1;k+1<polygon.size();k++)indices.insert(indices.end(),{start,start+k,start+k+1});
             }
         }
     }
@@ -375,7 +401,16 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
     // are never covered by a differently tessellated heightfield underneath.
     if(t.left()<1400&&t.top()<1400&&t.left()+t.size()>-1400&&t.top()+t.size()>-1400){
         auto originalIndices=std::move(indices);indices.clear();
-        auto distance=[&](unsigned i){auto &v=vertices[i];double x=t.left()+v.position[0],z=t.top()+v.position[2];return std::hypot(x,z)-canyon::RidgeRadius(x,z);};
+        auto distance=[&](unsigned i){
+            auto &v=vertices[i];double x=t.left()+v.position[0],z=t.top()+v.position[2];
+            double ridge=std::hypot(x,z)-canyon::RidgeRadius(x,z);
+            // The authored outlet extends beyond the radial ridge mask. Its
+            // floor ends at x=-1140.72..-1142.36; keep this whole native throat
+            // clear, with a two-unit hidden overlap at the open edge.
+            double throat=std::min({x+1138.,-850.-x,z+260.,-40.-z});
+            if(v.position[1]<.1f&&x<-850&&z>-260&&z<-40)return -1138.-x;
+            return std::min(ridge,-throat);
+        };
         auto vertex=[&](unsigned a,unsigned b,double f,bool edge){
             auto v=vertices[a],snow=snowVertices[a];
             for(int k=0;k<3;k++){v.position[k]=float(std::lerp(double(v.position[k]),double(vertices[b].position[k]),f));v.normal[k]=float(std::lerp(double(v.normal[k]),double(vertices[b].normal[k]),f));}
@@ -401,6 +436,18 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
         };
         for(size_t i=0;i+2<originalIndices.size();i+=3)clip(clip,originalIndices[i],originalIndices[i+1],originalIndices[i+2],0);
     }
+    // Stitch beneath the authored floor's slanted open edge. A radial cliff
+    // contour cannot describe this narrow throat exactly; a small flat apron
+    // overlaps both floor meshes and closes sub-triangle corner gaps.
+    if(t.left()<=-1200&&t.left()+t.size()>-1200&&t.top()<=-150&&t.top()+t.size()>-150){
+        unsigned start=unsigned(vertices.size());
+        for(auto p:std::array<canyon::Point,4>{{{-1290,-215},{-1290,-85},{-1138,-215},{-1138,-85}}}){
+            gfx::Vertex3D v{};v.position[0]=float(p.x-t.left());v.position[1]=-.025f;v.position[2]=float(p.z-t.top());
+            auto normal=canyon::FloorNormal(p.x,p.z);std::copy_n(normal.data(),3,v.normal);
+            v.color[0]=v.color[1]=v.color[2]=128;vertices.push_back(v);snowVertices.push_back(v);
+        }
+        indices.insert(indices.end(),{start,start+1,start+2,start+2,start+1,start+3});
+    }
     // Clipping can coincide with an existing edge/vertex. Do not submit the
     // resulting zero-area faces to rendering or collision.
     size_t kept=0;
@@ -417,7 +464,8 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
     bool hillUsed=false;
     for(auto v:vertices){
         auto c=terrain::CanyonLandform(t.left()+v.position[0],t.top()+v.position[2]);
-        double mask=c.weight*terrain::Smooth(80,135,canyon::At(t.left()+v.position[0],t.top()+v.position[2]).height);
+        double localHeight=v.position[1]-(c.height-canyon::At(t.left()+v.position[0],t.top()+v.position[2]).height);
+        double mask=c.weight*terrain::Smooth(80,135,localHeight);
         v.color[3]=uint8_t(128*mask);hillUsed|=mask>.005;result.hillVertices.push_back(v);
     }
     if(!hillUsed)result.hillVertices.clear();
@@ -831,11 +879,14 @@ void TownTerrainDraw(CEditGround *ground) {
         std::fprintf(stderr, "terrain: player %.2f %.2f %.2f ground %.2f far %.0f\n", world::X(pos[0]), pos[1], world::Z(pos[2]), world::Height(pos[0], pos[2]), mgRenderInfo.far[2]);
     }
     auto                       binding = BiomeSurfaceBinding("e01/e01b01");
+    auto canyonFloorBinding=BiomeSurfaceBinding("e01/e01b02");
+    canyonFloorBinding.filter=gfx::Filter::Linear;
+    canyonFloorBinding.wrap_u=canyonFloorBinding.wrap_v=gfx::Wrap::Repeat;
     auto                       rockBinding = BiomeSurfaceBinding("e02/e02b21");
-    auto canyonHillBinding=BiomeSurfaceBinding("e01/e01b05");
+    auto canyonHillBinding=BiomeSurfaceBinding("native/e01/e01b05");
     canyonHillBinding.filter=gfx::Filter::Linear;
     canyonHillBinding.wrap_u=canyonHillBinding.wrap_v=gfx::Wrap::Repeat;
-    auto canyonRockBinding=BiomeSurfaceBinding("e01/e01b06");
+    auto canyonRockBinding=BiomeSurfaceBinding("native/e01/e01b06");
     canyonRockBinding.filter=gfx::Filter::Linear;
     canyonRockBinding.wrap_u=canyonRockBinding.wrap_v=gfx::Wrap::Repeat;
     if(const char *diagnostic=std::getenv("DC_TERRAIN_DIAGNOSTIC");diagnostic&&std::strcmp(diagnostic,"geometry")==0) {
@@ -953,10 +1004,23 @@ void TownTerrainDraw(CEditGround *ground) {
         constants.world_uv[0][3] = float(std::fmod(tile.left()/floorPeriod,4096));
         constants.world_uv[1][2] = float(1/floorPeriod);
         constants.world_uv[1][3] = float(std::fmod(tile.top()/floorPeriod,4096));
-        gfx::DrawMesh(chunk.mesh, 0, chunk.indexCount, constants, binding, state, &transform);
+        if(nativeStyle){
+            constants.flags|=gfx::kMeshTerrainNative;
+            constants.flags&=~gfx::kMeshTerrainTriplanar;
+            // Continue the original exit floor's affine UV mapping (e01b02),
+            // including its slight skew and phase at the open boundary edge.
+            constexpr double ux=.00464379610,uz=.0000817849809,uo=5.81250272;
+            constexpr double vx=-.000253333965,vz=-.00537387167,vo=-.289812982;
+            constants.world_uv[0][0]=float(ux);constants.world_uv[0][2]=float(uz);
+            constants.world_uv[0][3]=float(std::fmod(tile.left()*ux+tile.top()*uz+uo,4096));
+            constants.world_uv[1][0]=float(vx);constants.world_uv[1][2]=float(vz);
+            constants.world_uv[1][3]=float(std::fmod(tile.left()*vx+tile.top()*vz+vo,4096));
+        }
+        gfx::DrawMesh(chunk.mesh, 0, chunk.indexCount, constants, nativeStyle?canyonFloorBinding:binding, state, &transform);
         BiomeDraw(chunk.biome,constants,state,transform,testTicks,0);
         constants.flags |= gfx::kMeshVertexColor | gfx::kMeshWorldUv | gfx::kMeshTerrainTriplanar;
         double wallPeriod=nativeStyle?100:240;
+        constants.world_uv[0][2]=0;constants.world_uv[1][0]=0;
         constants.world_uv[0][0] = float(1/wallPeriod);
         constants.world_uv[0][3] = float(std::fmod(tile.left()/wallPeriod,4096));
         constants.world_uv[1][2] = float(1/wallPeriod);

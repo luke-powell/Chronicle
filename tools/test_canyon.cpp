@@ -4,7 +4,7 @@
 #include <cstdio>
 int main(){
  std::ifstream in("port/build/norune-shell.bin",std::ios::binary);auto &shell=canyon::TownShell();
- assert(in.read(reinterpret_cast<char *>(shell.heights.data()),sizeof(shell.heights)));shell.ready=true;
+ assert(in.read(reinterpret_cast<char *>(shell.heights.data()),sizeof(shell.heights)));canyon::RestoreShellRidges();
  for(int z=-700;z<=500;z+=16)for(int x=-700;x<=700;x+=16)assert(std::abs(terrain::LandHeight(x,z))<.01);
  int exits=0;bool first=false,previous=false;
  for(int i=0;i<2048;i++){

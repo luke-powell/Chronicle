@@ -4,8 +4,22 @@
 #include <queue>
 #include <cstdio>
 int main(){
+ // Coarse triangulation must not put a dam across diagonal corridors. Invert
+ // the district warp to sample the actual centre of every network segment.
+ int centres=0;auto district=canyon::Generate(0,0);
+ for(auto line:canyon::Corridors().lines)for(int k=0;k<5;k++){
+  double tx=std::lerp(line.a.x,line.b.x,k/4.),tz=std::lerp(line.a.z,line.b.z,k/4.),x=tx,z=tz;
+  for(int iteration=0;iteration<12;iteration++){
+   double warp=canyon::Smooth(1800,2800,std::hypot(x,z));
+   x=tx-warp*80*std::sin(z/510+canyon::Unit(district.seed)*6);
+   z=tz-warp*60*std::sin(x/630+canyon::Unit(district.seed+1)*6);
+  }
+  auto sample=canyon::At(x,z);if(std::hypot(x,z)<1950||sample.weight<1)continue;
+  assert(sample.height<.01);centres++;
+ }
+ std::printf("PASS %d route centres remain flat across coarse mesh diagonals\n",centres);
  auto &shell=canyon::TownShell();std::ifstream in("port/build/norune-shell.bin",std::ios::binary);
- assert(in.read(reinterpret_cast<char *>(shell.heights.data()),sizeof(shell.heights)));shell.ready=true;
+ assert(in.read(reinterpret_cast<char *>(shell.heights.data()),sizeof(shell.heights)));canyon::RestoreShellRidges();
  constexpr int nx=751,nz=876;constexpr double step=32,x0=-22016,z0=-10016;
  std::vector<double> h(nx*nz);std::vector<bool> seen(nx*nz);
  for(int z=0;z<nz;z++)for(int x=0;x<nx;x++)h[z*nx+x]=terrain::LandHeight(x0+x*step,z0+z*step);

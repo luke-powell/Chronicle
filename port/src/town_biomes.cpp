@@ -196,6 +196,7 @@ void LoadTextures(const char *town) {
                             level.pixels.resize(size_t(level.width) * level.height * (decoded->format == gfx::TextureFormat::Index8 ? 1 : 4));
                         }
                     }
+                    if(key=="e01/e01b05"||key=="e01/e01b06")textures["native/"+key]=gfx::tim2::Upload(*decoded);
                     if (key=="e01/e01b01" || key=="e01/e01b05" || key=="e01/e01b06" || key=="e02/e02b21" || key=="e02/e02b02" || key=="e04/e04b01" || key=="e03/e03b03") {
                         gfx::tim2::Image surface;
                         gfx::tim2::Level base;
@@ -549,6 +550,7 @@ void BiomePrepare(CEditGround *ground) {
             treePrototypes[lod][species].push_back(std::move(mesh));
         }
         requiredTextures["e01/e01b01"]=true;
+        requiredTextures["e01/e01b02"]=true;
         requiredTextures["e02/e02b21"]=true;
         LoadTextures("e01");
         LoadTextures("e02");
