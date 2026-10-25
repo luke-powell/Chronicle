@@ -1,5 +1,6 @@
 #ifdef PORT
 #include "world_origin.hpp"
+#include "dran_flight.hpp"
 #endif
 #ifdef PORT
 #include "world_georama.hpp"
@@ -3875,6 +3876,9 @@ void MoveChara() {
     EdMoveCharaInfo.points = info->work.events.points;
     EdMoveCharaInfo.point_count = info->event_count;
     EdMoveCharaInfo.fishing = (GameMode == ED_MODE_FISHING);
+#ifdef PORT
+    if (DranFlightStep(static_cast<CMainChara *>(Chara))) return;
+#endif
     EdMoveChara();
 
     if (EdMoveCharaInfo.system_event_no > 0) {

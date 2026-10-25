@@ -1,4 +1,5 @@
 #include "town_combat.hpp"
+#include "dran_flight.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -351,6 +352,7 @@ void TownCombatDraw(CCharacter *chara) {
 }
 
 PORT_OVERRIDE void CMainChara::Draw() {
+    if (DranFlightDraw(this)) return;
     CCharacter::Draw();
     TownCombatDraw(this);
 }

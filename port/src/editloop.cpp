@@ -1,3 +1,4 @@
+#include "dran_flight.hpp"
 #include "world_origin.hpp"
 #include "biome_music.hpp"
 #include "common.h"
@@ -1192,6 +1193,7 @@ PORT_OVERRIDE int EditLoop() {
         sound_off_cnt = 0;
     }
 
+    DranFlightHUD();
     DebugFont__3.length = 0;
 
     if (GamePad.On(PAD_CIRCLE) != 0) {

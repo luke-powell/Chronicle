@@ -1,4 +1,5 @@
 #include "world_origin.hpp"
+#include "dran_flight.hpp"
 #include "town_terrain.hpp"
 #include "town_biomes.hpp"
 
@@ -258,7 +259,7 @@ void Update(double x, double z, int minimumLevel) {
     // A walking teleport must never display a distant coarse triangle over
     // the destination's collision surface. Finish this one-time load before
     // presenting it; ordinary travel and editor panning keep the 2 ms budget.
-    if (GameMode == ED_MODE_WALK && minimumLevel == 0 && !active.empty() &&
+    if (GameMode == ED_MODE_WALK && !DranFlightActive() && minimumLevel == 0 && !active.empty() &&
         (std::abs(cx - lastX) > 4096 || std::abs(cz - lastZ) > 4096)) {
         if(std::getenv("DC_TERRAIN_TRACE"))std::fprintf(stderr,"terrain: loading teleport destination %.2f %.2f before display\n",x,z);
         active.clear();
@@ -431,6 +432,14 @@ void TownTerrainDraw(CEditGround *ground) {
         pos[2] = ECursorFrame->position[2];
     }
     int minimumLevel = 0;
+    if (DranFlightActive()) {
+        // Flight covers many walking tiles each second. Keep river detail on
+        // the CPU worker, with a smaller aerial selection and no blocking
+        // teleport reload when the complete published selection falls behind.
+        double groundHeight = terrain::FlightSurfaceHeight(world::X(pos[0]), world::Z(pos[2]));
+        double altitude = std::max(0.0, double(pos[1]) - groundHeight);
+        minimumLevel = std::clamp(int(std::log2(std::max(1.0, altitude / 512.0))) + 2, 2, 6);
+    }
     if (GameMode == ED_MODE_GEORAMA || GameMode == ED_MODE_GEORAMA_MENU_INIT || GameMode == ED_MODE_GEORAMA_MENU) {
         minimumLevel = std::clamp(int(std::floor(std::log2(std::max(1.f, EditCamera.GetDistance() / 8000.f)))), 0, terrain::MaxLevel - 1);
     }

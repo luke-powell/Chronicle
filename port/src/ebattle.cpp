@@ -1,3 +1,4 @@
+#include "dran_flight.hpp"
 #include "ebattle.hpp"
 
 #include <algorithm>
@@ -389,4 +390,11 @@ PORT_OVERRIDE int EdPadOn(int keys, int mode) {
     // R1 is guard during a town attack; it must not also orbit the camera.
     if (TownCombatBusy()) keys &= ~PAD_R1;
     return GamePad.On(keys);
+}
+
+PORT_OVERRIDE int EdPadDown(int keys, int mode) {
+    if (!PortEdCheckKeyMode(mode)) return 0;
+    // Keep flight controls out of ground-only menus, editor and first-person mode.
+    if (DranFlightActive()) keys &= ~(PAD_SELECT | PAD_TRIANGLE | PAD_SQUARE | PAD_R3);
+    return GamePad.Down(keys);
 }

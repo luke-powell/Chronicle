@@ -1,4 +1,5 @@
 #include "biome_music.hpp"
+#include "dran_flight.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -76,7 +77,9 @@ void BiomeMusicTick(bool interior, bool allowed, double x, double z) {
     }
     int desired = 4;
     if (!interior) {
-        auto c = terrain::ClimateAt(x, z, terrain::LandHeight(x, z));
+        // In flight choose the regional biome, rather than constructing a
+        // drainage network on the game thread just to identify a riverbank.
+        auto c = terrain::ClimateAt(x, z, terrain::LandHeight(x, z), DranFlightActive() ? 2048 : 0);
         desired = c.biome == terrain::Biome::Alpine ? 3 : c.biome == terrain::Biome::Dryland                                                                                 ? 2
                                                       : (c.biome == terrain::Biome::Woodland || c.biome == terrain::Biome::Rainforest || c.biome == terrain::Biome::Wetland) ? 1
                                                                                                                                                                              : 0;
