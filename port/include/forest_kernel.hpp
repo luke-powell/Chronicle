@@ -40,8 +40,11 @@ inline std::vector<Tree> Generate(double left, double top, double size) {
                 double y = terrain::SurfaceHeight(x, z);
                 auto   c = terrain::ClimateAt(x, z, y);
                 double density = terrain::VegetationDensity(x, z, c);
+                auto weathered=terrain::WeatheringAt(x,z);
+                bool rockDebris=layer==2 && double(terrain::Mix(seed+2381)>>11)/9007199254740992. < std::max(weathered.talus,weathered.bedrock*.3);
                 if (layer == 2) {
                     density *= .42;
+                    if(rockDebris)density=std::max(density,.16*c.land*(1-c.snow));
                 }
                 if (double((seed >> 32) & 65535) / 65535 > density) {
                     continue;
@@ -56,9 +59,14 @@ inline std::vector<Tree> Generate(double left, double top, double size) {
                     continue;
                 }
                 int    species = terrain::TreeSpecies(c, double(terrain::Mix(seed + 817) >> 11) / 9007199254740992.);
+                if(rockDebris)species=4;
+                // Two retail palm silhouettes share the tropical ecological niche.
+                // Dead branches are rare woodland debris, never a desert tree fallback.
+                if (species == 2 && (terrain::Mix(seed + 921) & 1)) species = 5;
+                if (species < 2 && layer == 2 && terrain::Mix(seed + 1223) % 24 == 0) species = 6;
                 double scale = .9 + double((seed >> 24) & 255) / 255 * 1.3;
                 if (layer == 2) {
-                    if (species == 3 && (seed & 1)) {
+                    if (species == 4 || (species == 3 && (seed & 1))) {
                         species = 4;
                         scale = .7 + double((seed >> 24) & 255) / 255;
                     } else {

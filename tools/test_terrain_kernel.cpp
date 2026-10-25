@@ -47,22 +47,22 @@ int main() {
                                                             : w / 2);
                 int    neighbor = LevelAt(s, px, pz);
                 assert(neighbor < 0 || std::abs(neighbor - t.level) <= 1);
-                if (neighbor <= t.level) {
+                if (neighbor < 0 || MeshSampleLevel(neighbor)<=MeshSampleLevel(t.level)) {
                     continue;
                 }
-                for (int i = 0; i <= Resolution; i++) {
-                    double vx = alongX ? x + w * i / Resolution : x + (edge == 1 ? w : 0);
-                    double vz = alongX ? z + (edge == 3 ? w : 0) : z + w * i / Resolution;
-                    double h = EdgeHeight(vx, vz, neighbor, alongX);
+                int resolution=MeshResolution(t.level),coarseLevel=MeshSampleLevel(neighbor);
+                double coarseStep=std::ldexp(BaseSize,coarseLevel)/Resolution;
+                for (int i = 0; i <= resolution; i++) {
+                    double vx = alongX ? x + w * i / resolution : x + (edge == 1 ? w : 0);
+                    double vz = alongX ? z + (edge == 3 ? w : 0) : z + w * i / resolution;
+                    double h = EdgeHeight(vx, vz, coarseLevel, alongX);
                     assert(std::isfinite(h));
-                    if (i % 2 == 0) {
-                        assert(std::abs(h - Height(vx, vz,std::ldexp(BaseSize,neighbor)/Resolution)) < 1e-8);
-                    } else {
-                        double half = w / Resolution;
-                        double a = Height(vx - (alongX ? half : 0), vz - (alongX ? 0 : half),std::ldexp(BaseSize,neighbor)/Resolution);
-                        double b = Height(vx + (alongX ? half : 0), vz + (alongX ? 0 : half),std::ldexp(BaseSize,neighbor)/Resolution);
-                        assert(std::abs(h - (a + b) / 2) < 1e-8);
-                    }
+                    // Compare every fine boundary vertex to the neighbouring
+                    // coarse mesh's actual straight edge, including 8:1 joins.
+                    double coord=alongX?vx:vz,start=std::floor(coord/coarseStep)*coarseStep;
+                    double a=Height(alongX?start:vx,alongX?vz:start,coarseStep);
+                    double b=Height(alongX?start+coarseStep:vx,alongX?vz:start+coarseStep,coarseStep);
+                    assert(std::abs(h-std::lerp(a,b,(coord-start)/coarseStep))<1e-8);
                 }
             }
         }

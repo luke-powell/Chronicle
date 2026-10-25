@@ -1,0 +1,77 @@
+Rock shoulders, cliffs and debris on hills and mountains
+2026-10-24
+
+References
+- Tzathas et al., Physically-based Analytical Erosion for Fast Terrain
+  Generation (2024), DOI 10.1111/cgf.15033.
+  https://diglib7.eg.org/items/0a412929-2e29-4bcb-a597-1a4b2cc558e2
+  Analytical erosion and hydrology can produce terrain without a costly
+  time-stepped simulation. This implementation does not reproduce their solver.
+- Yang et al., Unerosion (2024), DOI 10.1111/cgf.15182.
+  https://diglib.eg.org/items/32a95921-aabd-48ea-acb0-e72f70264260
+  Thermal transport distinguishes unstable faces from deposition surfaces.
+- Mathematical modeling of talus development (2006).
+  https://doi.org/10.1016/j.cageo.2006.05.004
+  Cliff retreat and accumulated debris must be considered together.
+- Warszawski et al., Procedural Method for Fast Table Mountains (2019).
+  https://www.mdpi.com/2076-3417/9/11/2352
+  Geometry and material resistance can directly encode erosion-like forms.
+
+Implementation
+The existing continental elevation field remains the base. Two bounded scales
+of deterministic rock sites add resistant shoulders, asymmetric broken faces,
+and downslope debris aprons. Site direction comes from the base gradient;
+regional hardness and slope determine strength. Joint noise breaks face edges.
+Partial cancellation of the uphill gradient forms shoulders in the mesh itself.
+Debris runout depends on source slope and a nominal 34-degree loose-material
+threshold. Very steep faces receive less deposited material.
+
+Small sites have roughly 21-29 metre radii; large sites have 170-235 metre
+radii. These are local features within hills and ranges, not whole mountains.
+Support stays inside each ownership cell, avoiding seams or neighbor searches.
+The protected town centre is unchanged. Bounded thread-local caches reuse
+immutable base elevations and feature sites across climate and drainage queries.
+
+Rock exposure follows these features. Trees and understory thin on exposed
+faces and debris, and deterministic forest population candidates place native
+retail boulders in suitable debris areas. Existing forest LOD ownership is used.
+River routing samples the modified terrain rather than an obsolete base field.
+
+Limits
+This is analytical morphology inspired by the references, not a simulation of
+weathering, mass-conserving rockfall, tectonics, or full thermal erosion. It is
+still a height field without overhangs. Finite mesh LOD filters small details at
+distance. The nominal debris angle controls runout, not a guaranteed bound on
+every composed terrain slope. Some smooth soil-covered hills remain intentional.
+
+Validation
+tools/test_weathering.cpp checks physical displacement, exposed rock, debris,
+protected town terrain, and ownership-cell continuity at large coordinates.
+tools/render_weathering.py renders actual-kernel before/after height fields with
+the same illumination and downhill cross-sections, not artist concept images.
+The existing river, mountain, biome, forest ownership, continental ecology and
+foundation/LOD suites also pass after the geometry change.
+
+Ground-level review, subsequent first pass
+The ground-level screenshots disproved the visual sufficiency of the local
+weathering pass: a large smooth base flank overwhelmed the ledges. Individual
+ridge frequencies previously inherited a 7.5-fold horizontal expansion and
+high octave suppression. Ridge and valley frequencies now use world-space
+kilometre scales separately from the continental envelope; subsidiary spurs
+retain more amplitude. This is still a ridged multifractal plus analytic
+valleys/benches, not the expanded research-driven redesign.
+
+Ground surfaces now retain their retail texel scale but receive complete RGBA
+mip chains, triplanar projection and smoothly blended texture orientations and
+phases. Imported texture provenance remains scene-qualified. Spatial hashing
+wraps at 4096 texture units to agree across chunk origins and rebases.
+
+The optional DC_WORLD_PREVIEW_GROUND_CAMERA environment variable accepts eye
+world X/Z and target world X/Y/Z; the eye is placed 16 game units above the
+actual finest terrain surface. It requires DC_WORLD_PREVIEW_SITE. Ordinary
+gameplay does not enable this camera override. The fixed eastern comparison is
+-103000,70312,-125000,14000,70312.
+
+Initial pass validation: release and shaders build; mountain morphology,
+foundation/LOD continuity, and 54 connected rivers with 1267 downhill segments
+pass. Visual approval remains separate from those numerical checks.

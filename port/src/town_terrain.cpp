@@ -65,7 +65,7 @@ unsigned terrainRevision=0;
 std::vector<terrain::Foundation> previousFoundations;
 std::vector<terrain::Road> previousRoads;
 
-// A single persistent CPU worker retains hydrology caches across jobs. GPU
+// During streaming, one persistent CPU worker retains hydrology caches. GPU
 // allocations and publication stay on the render thread. Only one job is in
 // flight: rapid editor movement cannot accumulate an unbounded work queue.
 class TerrainWorker {
@@ -143,7 +143,7 @@ std::array<int, 4> Edges(const terrain::Tile &t, const terrain::Selection &s) {
 }
 
 Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
-    const int n=t.level>=8?4:t.level>=4?8:terrain::Resolution;
+    const int n=terrain::MeshResolution(t.level);
     std::vector<gfx::Vertex3D> vertices;
     std::vector<uint32_t>      indices;
     std::vector<gfx::Vertex3D> snowVertices;
@@ -154,21 +154,24 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
         for (int x = 0; x <= n; x++) {
             double wx = t.left() + x * step, wz = t.top() + z * step;
             double h = terrain::Height(wx, wz,step);
-            if (x == 0 && edges[0] > t.level) {
-                h = terrain::EdgeHeight(wx, wz, edges[0]+(edges[0]>=8?2:edges[0]>=4?1:0), false);
+            if (x == 0 && edges[0]>=0 && terrain::MeshSampleLevel(edges[0])>terrain::MeshSampleLevel(t.level)) {
+                h = terrain::EdgeHeight(wx, wz, terrain::MeshSampleLevel(edges[0]), false);
             }
-            if (x == n && edges[1] > t.level) {
-                h = terrain::EdgeHeight(wx, wz, edges[1]+(edges[1]>=8?2:edges[1]>=4?1:0), false);
+            if (x == n && edges[1]>=0 && terrain::MeshSampleLevel(edges[1])>terrain::MeshSampleLevel(t.level)) {
+                h = terrain::EdgeHeight(wx, wz, terrain::MeshSampleLevel(edges[1]), false);
             }
-            if (z == 0 && edges[2] > t.level) {
-                h = terrain::EdgeHeight(wx, wz, edges[2]+(edges[2]>=8?2:edges[2]>=4?1:0), true);
+            if (z == 0 && edges[2]>=0 && terrain::MeshSampleLevel(edges[2])>terrain::MeshSampleLevel(t.level)) {
+                h = terrain::EdgeHeight(wx, wz, terrain::MeshSampleLevel(edges[2]), true);
             }
-            if (z == n && edges[3] > t.level) {
-                h = terrain::EdgeHeight(wx, wz, edges[3]+(edges[3]>=8?2:edges[3]>=4?1:0), true);
+            if (z == n && edges[3]>=0 && terrain::MeshSampleLevel(edges[3])>terrain::MeshSampleLevel(t.level)) {
+                h = terrain::EdgeHeight(wx, wz, terrain::MeshSampleLevel(edges[3]), true);
             }
-            double        nx = terrain::Height(wx - 8, wz,step) - terrain::Height(wx + 8, wz,step);
-            double        nz = terrain::Height(wx, wz - 8,step) - terrain::Height(wx, wz + 8,step);
-            double        length = std::sqrt(nx * nx + 256 + nz * nz);
+            // A coarse mesh cannot resolve centimetre-scale lighting detail.
+            // Sample normals at its footprint to avoid striped distant faces.
+            double normalStep=std::max(8.,step*.5),ny=normalStep*2;
+            double        nx = terrain::Height(wx - normalStep, wz,step) - terrain::Height(wx + normalStep, wz,step);
+            double        nz = terrain::Height(wx, wz - normalStep,step) - terrain::Height(wx, wz + normalStep,step);
+            double        length = std::sqrt(nx * nx + ny*ny + nz * nz);
             gfx::Vertex3D v{};
             v.position[0] = float(x * step);
             v.position[1] = float(h) - 0.04f;
@@ -176,12 +179,12 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
             high = std::max(high, v.position[1]);
             v.position[2] = float(z * step);
             v.normal[0] = float(nx / length);
-            v.normal[1] = float(16 / length);
+            v.normal[1] = float(ny / length);
             v.normal[2] = float(nz / length);
             v.uv[0] = float((std::fmod(t.left(), 200) + x * step) / 200);
             v.uv[1] = float((std::fmod(t.top(), 200) + z * step) / 200);
-            double slope = 1 - 16 / length;
-            double rock = terrain::RockExposure(wx,wz,h,16/length);
+            double slope = 1 - ny / length;
+            double rock = terrain::RockExposure(wx,wz,h,ny/length);
             double snow = terrain::FinishClimate(terrain::BaseClimateAt(wx,wz,h),h).snow;
             snow *= std::clamp((.8 - slope) * 2.5, 0.0, 1.0);
             v.color[0] = v.color[1] = v.color[2] = 128;
@@ -201,7 +204,8 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
     }
     Chunk result;
     result.edges=edges;result.low=low;result.high=std::max(high+1000,float(terrain::SeaLevel+20));
-    result.biome=BiomeBuild(t,vertices,indices);result.indexCount=unsigned(indices.size());
+    if(!std::getenv("DC_TERRAIN_DIAGNOSTIC"))result.biome=BiomeBuild(t,vertices,indices);
+    result.indexCount=unsigned(indices.size());
     result.vertices=std::move(vertices);result.indices=std::move(indices);
     if(hasSnow)result.snowVertices=std::move(snowVertices);
     return result;
@@ -286,6 +290,43 @@ void Update(double x, double z, int minimumLevel) {
         planned = true;
     }
     bool initial = active.empty();
+    // Cold generation has no old coverage to display. Build a bounded batch
+    // in parallel, then upload on the render thread. Build/BiomeBuild only read
+    // prepared assets; terrain, drainage and population caches are thread-local.
+    // Streaming keeps its existing single-job queue and two-millisecond budget.
+    if(initial && !building.valid() && !uploading && pendingCursor<pending.size()) {
+        constexpr size_t capacity=8;
+        static std::array<std::unique_ptr<TerrainWorker>,capacity-1> coldWorkers;
+        const size_t count=std::clamp(size_t(std::thread::hardware_concurrency()/2),size_t(1),capacity);
+        struct Flight { std::future<Chunk> result; MeshKey key; };
+        std::array<Flight,capacity> flights;
+        auto worker=[&](size_t i)->TerrainWorker& {
+            if(i==0)return Worker();
+            if(!coldWorkers[i-1])coldWorkers[i-1]=std::make_unique<TerrainWorker>();
+            return *coldWorkers[i-1];
+        };
+        auto submit=[&](size_t i) {
+            if(pendingCursor>=pending.size())return;
+            auto key=pending[pendingCursor++];
+            flights[i].key=key;flights[i].result=worker(i).Submit(key);
+        };
+        for(size_t i=0;i<count;++i)submit(i);
+        for(;;) {
+            size_t ready=count,first=count;
+            for(size_t i=0;i<count;++i)if(flights[i].result.valid()) {
+                if(first==count)first=i;
+                if(flights[i].result.wait_for(std::chrono::seconds(0))==std::future_status::ready){ready=i;break;}
+            }
+            if(first==count)break;
+            if(ready==count)ready=first;
+            auto chunk=flights[ready].result.get();
+            Upload(chunk,std::chrono::steady_clock::time_point::max());
+            auto key=flights[ready].key;
+            if(auto it=cache.find(key);it!=cache.end()){Destroy(it->second.chunk);it->second={std::move(chunk),cacheClock,false};}
+            else cache.emplace(key,CachedChunk{std::move(chunk),cacheClock,false});
+            ++built;submit(ready);
+        }
+    }
     // Bound terrain work during movement. Meshes are cached with their seam
     // topology, so revisiting a boundary does not destroy and recreate them.
     while (pendingCursor < pending.size() || building.valid() || uploading) {
@@ -445,9 +486,11 @@ void TownTerrainDraw(CEditGround *ground) {
         std::fprintf(stderr,"terrain surface: %.5f foundations %zu\n",world::SurfaceHeight(pos[0],pos[2]),terrain::Foundations().size());
         std::fprintf(stderr, "terrain: player %.2f %.2f %.2f ground %.2f far %.0f\n", world::X(pos[0]), pos[1], world::Z(pos[2]), world::Height(pos[0], pos[2]), mgRenderInfo.far[2]);
     }
-    auto                      *texture = TexManager.GetTexture(const_cast<char *>("e01b01"), -1);
-    auto                       binding = PortTextureFromCTexture(texture).binding;
-    auto                       rockBinding = PortTextureFromCTexture(TexManager.GetTexture(const_cast<char *>("e01b06"), -1)).binding;
+    auto                       binding = BiomeSurfaceBinding("e01/e01b01");
+    auto                       rockBinding = BiomeSurfaceBinding("e02/e02b21");
+    if(const char *diagnostic=std::getenv("DC_TERRAIN_DIAGNOSTIC");diagnostic&&std::strcmp(diagnostic,"geometry")==0) {
+        binding={};rockBinding={};
+    }
     static gfx::tim2::Uploaded ice;
     if (!ice.texture || !gfx::GetTextureInfo(ice.texture)) {
         std::ifstream file(PathsDataRoot() / "dun/item/main_data/icebig.img", std::ios::binary);
@@ -548,13 +591,18 @@ void TownTerrainDraw(CEditGround *ground) {
         constants.clip_plane[1][3] = 2e-6f; // clear-air aerosol scattering, per metre.
         float white[4] = {1, 1, 1, 1}, black[4] = {0, 0, 0, 0};
         Draw3DMaterial(constants, info, white, white, black);
+        constants.flags |= gfx::kMeshWorldUv | gfx::kMeshTerrainTriplanar;
+        constants.world_uv[0][0] = 1.f / 200;
+        constants.world_uv[0][3] = float(std::fmod(tile.left()/200,4096));
+        constants.world_uv[1][2] = 1.f / 200;
+        constants.world_uv[1][3] = float(std::fmod(tile.top()/200,4096));
         gfx::DrawMesh(chunk.mesh, 0, chunk.indexCount, constants, binding, state, &transform);
         BiomeDraw(chunk.biome,constants,state,transform,testTicks,0);
         constants.flags |= gfx::kMeshVertexColor | gfx::kMeshWorldUv | gfx::kMeshTerrainTriplanar;
         constants.world_uv[0][0] = 1.f / 240;
-        constants.world_uv[0][3] = float(std::fmod(tile.left(), 240) / 240);
+        constants.world_uv[0][3] = float(std::fmod(tile.left()/240,4096));
         constants.world_uv[1][2] = 1.f / 240;
-        constants.world_uv[1][3] = float(std::fmod(tile.top(), 240) / 240);
+        constants.world_uv[1][3] = float(std::fmod(tile.top()/240,4096));
         auto overlay = state;
         overlay.blend = true;
         overlay.alpha = {};

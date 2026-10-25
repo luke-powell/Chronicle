@@ -17,6 +17,16 @@ constexpr double BaseSize = 512;
 constexpr double Radius = 112640000;
 constexpr int    MaxLevel = 18;
 
+// Water and the supporting near terrain share one tessellation. Narrow channels
+// otherwise disappear beneath the straight chords of a much coarser hillside.
+inline int MeshResolution(int level) {
+    return level<=2 ? Resolution<<level : level==3 ? 64 : level>=8 ? 8 : Resolution;
+}
+inline int MeshSampleLevel(int level) {
+    return level<=2 ? 0 : level==3 ? 1 : level>=8 ? level+1 : level;
+}
+
+
 struct Tile {
     int64_t x, z;
     int     level;
@@ -105,9 +115,10 @@ inline Geography GeographyAt(double x,double z) {
 // These analytic landforms have global ownership and no simulation tile edges.
 struct MountainForm {
     double height, valley, bench;
+    double erosionBase=0;
 };
 
-inline MountainForm MountainAt(double x, double z) {
+inline MountainForm MountainAtUncached(double x, double z) {
     double town = Smooth(1250, 2150, std::hypot(x, z));
     double hills = town * (95 * Noise(x / 2400, z / 2400) + 22 * Noise(x / 850, z / 850) + 5 * Noise(x / 280, z / 280));
     double approach = Smooth(24000, 85000, std::hypot(x, z));
@@ -120,25 +131,32 @@ inline MountainForm MountainAt(double x, double z) {
     double wx = mx + 6500 * ClimateNoise(mx / 27000 + 17, mz / 27000 - 31);
     double wz = mz + 6500 * ClimateNoise(mx / 27000 - 48, mz / 27000 + 9);
     double mass = geography.range * (.65 + .35 * Smooth(-.45,.45,ClimateNoise(wx/62000+4,wz/62000+7)));
-    double ridges = 0, weight = 1, amplitude = .64, scale = 24000;
-    for (int octave = 0; octave < 6; ++octave) {
-        double ridge = 1 - std::abs(ClimateNoise(wx / scale + 11, wz / scale - 8));
-        ridge *= ridge;
+    // The range envelope is continental, but individual ridges are kilometres
+    // across. Previously these frequencies were also divided by 7.5, making
+    // a single smooth flank span an entire range; the .18 octave falloff then
+    // removed almost all subsidiary spurs.
+    double rx=x+2400*ClimateNoise(x/32000+17,z/32000-31);
+    double rz=z+2400*ClimateNoise(x/32000-48,z/32000+9);
+    double ridges = 0, weight = 1, amplitude = .70, scale = 55000;
+    for (int octave = 0; octave < 4; ++octave) {
+        double n=ClimateNoise(rx / scale + 11, rz / scale - 8);
+        double ridge = std::max(0.,1.05-std::sqrt(n*n+.0025));
+        ridge = std::pow(ridge,1.8);
         ridges += amplitude * ridge * weight;
-        weight = std::clamp(ridge * 1.7, 0., 1.);
-        amplitude *= octave >= 2 ? .18 : .47;
-        scale *= .48;
+        weight = std::clamp(ridge * 1.9, 0., 1.);
+        amplitude *= .34;
+        scale *= .47;
     }
     double relief = mass * 24000 * ridges;
     // Wide, gently undulating valley floors; glacial-style shoulders concentrate
     // steepness at valley walls instead of spreading it across every hillside.
-    double vx = wx + 900 * ClimateNoise(wx / 3400 + 16, wz / 3400 - 28);
-    double vz = wz + 900 * ClimateNoise(wx / 3400 - 73, wz / 3400 + 19);
-    double channel = std::abs(ClimateNoise(vx / 10500 + 54, vz / 10500 - 27));
+    double vx = rx + 1100 * ClimateNoise(rx / 6800 + 16, rz / 6800 - 28);
+    double vz = rz + 1100 * ClimateNoise(rx / 6800 - 73, rz / 6800 + 19);
+    double channel = std::abs(ClimateNoise(vx / 51000 + 54, vz / 51000 - 27));
     double glaciation = Smooth(.2, .8, ClimateNoise(wx / 19000 - 18, wz / 19000 + 61) + .5);
     double valleyWall = Smooth(.035, std::lerp(.32, .48, glaciation), channel);
     double floor = SeaLevel + 3500*geography.continental + mass*(1300+650*ClimateNoise(wx/17000-7,wz/17000+31));
-    relief -= std::min(relief, .9 * relief + 1500) * (1 - valleyWall);
+    relief *= 1-.50*(1-valleyWall);
     // Resistant strata produce local benches and escarpments, never global steps.
     double benches = Smooth(-.1, .6, ClimateNoise(wx / 12000 - 81, wz / 12000 + 15)) *
                      Smooth(1000, 2800, relief) * (1 - Smooth(10000, 17000, relief));
@@ -148,7 +166,7 @@ inline MountainForm MountainAt(double x, double z) {
     relief -= .88 * delta * bench;
     // Broken crags on exposed shoulders, subdued soil-covered detail on benches.
     double rough = mass * (1 - bench) * valleyWall;
-    double detail = rough * (650 * ClimateNoise(wx / 2100 + 7, wz / 2100 - 49) + 170 * ClimateNoise(wx / 550, wz / 550) + 45 * ClimateNoise(wx / 190 + 24, wz / 190 - 17));
+    double detail = rough * (450 * ClimateNoise(rx / 2600 + 7, rz / 2600 - 49) + 180 * ClimateNoise(rx / 800, rz / 800) + 55 * ClimateNoise(rx / 260 + 24, rz / 260 - 17));
     double foothills = geography.land*(1-mass)*(230*ClimateNoise(x/13000-31,z/13000+6)+45*ClimateNoise(x/1800+13,z/1800-7));
     // Broad sedimentary tablelands: varied soft shoulders, isolated caprock and
     // incised corridors, rather than terracing every mountain at the same height.
@@ -158,10 +176,125 @@ inline MountainForm MountainAt(double x, double z) {
     mesa*=1-.88*cut;
     foothills+=mesa;
     double elevation = floor + relief + detail + foothills;
-    return {hills + approach * elevation, approach * geography.range * (1 - valleyWall), approach * bench};
+    return {hills + approach * elevation, approach * geography.range * (1 - valleyWall), approach * bench,
+            hills+approach*(floor+relief+foothills)};
 }
 
-inline double MountainHeight(double x, double z) { return MountainAt(x, z).height; }
+inline MountainForm BaseMountainAt(double x,double z) {
+    // Climate, rock sites, drainage and surface normals repeatedly ask for the
+    // same immutable base landscape. Keep a bounded, thread-local point cache.
+    struct Sample { double x=0,z=0;MountainForm form{};bool valid=false; };
+    static thread_local std::array<Sample,65536> cache;
+    auto &s=cache[Mix(std::bit_cast<uint64_t>(x)^Mix(std::bit_cast<uint64_t>(z)))&(cache.size()-1)];
+    if(s.valid&&s.x==x&&s.z==z)return s.form;
+    auto form=MountainAtUncached(x,z);s={x,z,form,true};return form;
+}
+
+// Analytic, slope-directed erosion appearance, not a droplet simulation.
+// Local kernels avoid the global-pivot distortion of rotated stripe noise.
+// The accumulated gradient turns subsequent, smaller gullies into branches.
+inline MountainForm MountainAt(double x,double z) {
+    struct Sample {double x=0,z=0;MountainForm form{};bool valid=false;};
+    static thread_local std::array<Sample,65536> cache;
+    auto &slot=cache[Mix(std::bit_cast<uint64_t>(x)^Mix(std::bit_cast<uint64_t>(z)))&(cache.size()-1)];
+    if(slot.valid&&slot.x==x&&slot.z==z)return slot.form;
+    auto result=BaseMountainAt(x,z);
+    double regional=Smooth(3200,16000,std::hypot(x,z))*Smooth(150,1600,result.height);
+    if(regional>0) {
+        // Orient kilometre-scale drainage with structural relief, excluding
+        // the small crag noise that otherwise rotates gullies at every rock.
+        double gx=(BaseMountainAt(x+256,z).erosionBase-BaseMountainAt(x-256,z).erosionBase)/512;
+        double gz=(BaseMountainAt(x,z+256).erosionBase-BaseMountainAt(x,z-256).erosionBase)/512;
+        double slope=std::hypot(gx,gz);
+        double size=18000,amplitude=regional*(90*Smooth(.025,.18,slope)+4000*Smooth(.25,.85,slope));
+        for(int octave=0;octave<4;++octave) {
+            double slope=std::hypot(gx,gz),px=-gz/std::max(slope,.001),pz=gx/std::max(slope,.001);
+            double qx=x/size,qz=z/size;
+            auto ix=int64_t(std::floor(qx)),iz=int64_t(std::floor(qz));
+            double sum=0,value=0,dx=0,dz=0;
+            for(int j=-1;j<=1;++j)for(int i=-1;i<=1;++i) {
+                auto h=Mix(uint64_t(ix+i)^Mix(uint64_t(iz+j)+7219));
+                double cx=ix+i+.35+.3*double(h&65535)/65535;
+                double cz=iz+j+.35+.3*double((h>>16)&65535)/65535;
+                double ux=qx-cx,uz=qz-cz,r=ux*ux+uz*uz;
+                double w=std::pow(std::max(0.,1-r/1.5625),3);
+                double phase=6.28318530718*(ux*px+uz*pz);
+                double co=std::cos(phase),si=std::sin(phase);
+                sum+=w;value+=w*co;dx+=w*si*px;dz+=w*si*pz;
+            }
+            if(sum>0) {
+                double fade=Smooth(.015,.16,slope);
+                double co=std::tanh(2*value/sum),channel=.5*(1-co);
+                result.height-=amplitude*channel*channel*channel*fade;
+                double derivative=6*channel*channel*(1-co*co);
+                gx-=amplitude*3.14159265359*dx/(sum*size)*fade*derivative;
+                gz-=amplitude*3.14159265359*dz/(sum*size)*fade*derivative;
+            }
+            size*=.45;amplitude*=.35;
+        }
+    }
+    slot={x,z,result,true};return result;
+}
+struct Weathering { double displacement=0, bedrock=0, talus=0; };
+struct RockSite { double x=0,z=0,dx=0,dz=0,slope=0,radius=0,height=0,strength=0; };
+inline RockSite RockSiteAt(double x,double z,int scale) {
+    const double cell=scale?12000:1536;
+    auto ix=int64_t(std::floor(x/cell)),iz=int64_t(std::floor(z/cell));
+    static thread_local std::map<std::tuple<int64_t,int64_t,int>,RockSite> cache;
+    auto key=std::tuple{ix,iz,scale};if(auto it=cache.find(key);it!=cache.end())return it->second;
+    RockSite site;uint64_t seed=Mix(uint64_t(ix)^Mix(uint64_t(iz)+91751+scale*613));
+    if(seed%4!=0) {
+        double cx=(ix+.35+.3*double((seed>>8)&65535)/65535)*cell;
+        double cz=(iz+.35+.3*double((seed>>24)&65535)/65535)*cell;
+        double h=MountainAt(cx,cz).height;
+        double hardness=Smooth(-.15,.45,ClimateNoise(cx/17000+35,cz/17000-71));
+        if(h>SeaLevel+90 && std::hypot(cx,cz)>3600 && hardness>.02) {
+            double sample=scale?256:64;
+            double gx=(MountainAt(cx+sample,cz).height-MountainAt(cx-sample,cz).height)/(2*sample);
+            double gz=(MountainAt(cx,cz+sample).height-MountainAt(cx,cz-sample).height)/(2*sample);
+            double slope=std::hypot(gx,gz);
+            double strength=hardness*Smooth(scale?.015:.006,scale?.10:.035,slope)*(1-Smooth(1.25,2.2,slope));
+            if(strength>.01) {
+                double radius=(scale?1700:210)+(scale?650:80)*double((seed>>40)&255)/255;
+                double height=scale?std::clamp(radius*slope*.42,90.,850.):std::clamp(radius*slope*1.1,24.,110.);
+                site={cx,cz,-gx/std::max(slope,.001),-gz/std::max(slope,.001),slope,radius,height,strength};
+            }
+        }
+    }
+    if(cache.size()>32768)cache.clear();cache.emplace(key,site);return site;
+}
+inline Weathering WeatheringAt(double x,double z) {
+    Weathering result;
+    const double townBlend=Smooth(3200,4800,std::hypot(x,z));
+    if(townBlend==0)return result;
+    for(int scale=0;scale<2;++scale) {
+        auto site=RockSiteAt(x,z,scale);if(!site.radius)continue;
+        double px=x-site.x,pz=z-site.z;
+        double u=(px*site.dx+pz*site.dz)/site.radius;
+        double v=(-px*site.dz+pz*site.dx)/site.radius;
+        if(u<-.95 || u>1.45 || std::abs(v)>1.0)continue;
+        double joints=ClimateNoise(x/(scale?410:85)+17,z/(scale?410:85)-23);
+        double width=1-Smooth(.35+.12*joints,.92+.05*joints,std::abs(v));
+        double cap=Smooth(-.95,-.55,u)*(1-Smooth(-.12,.04,u));
+        double strength=width*site.strength*townBlend;
+        // Resistant ledge above an asymmetric retreating face. Cancelling most
+        // of the local slope creates a real shoulder, rather than a noise bump.
+        double bench=site.height+.82*site.slope*u*site.radius;
+        double fracture=(scale?35:6)*joints*(1-std::abs(v));
+        result.displacement+=strength*cap*(bench+fracture);
+        result.bedrock=std::max(result.bedrock,strength*cap);
+        // Debris rests below the face and thins downslope. The runout depends
+        // on the available slope below a 34-degree loose-material threshold.
+        double amount=site.height*.32;
+        double run=std::min(site.radius*1.4,site.radius*.3+amount/std::max(.10,.6745-site.slope));
+        double apron=Smooth(-.04,.10,u)*(1-Smooth(0,run,std::max(0.,u*site.radius)));
+        apron*=1-Smooth(.55,.85,site.slope);
+        result.displacement+=strength*amount*apron;
+        result.talus=std::max(result.talus,strength*apron);
+    }
+    return result;
+}
+inline double MountainHeight(double x, double z) { return MountainAt(x, z).height+WeatheringAt(x,z).displacement; }
 
 // Exposed rock follows steepness and broken uplands; altitude alone is not rock.
 inline double RockExposure(double x, double z, double height, double normalY);
@@ -268,11 +401,13 @@ inline double RockExposure(double x, double z, double height, double normalY) {
     double cliff = Smooth(.06, .32, 1 - normalY);
     double broken = Smooth(.18, .65, ClimateNoise(x / 1900 + 84, z / 1900 - 12));
     double alpine = Smooth(12500, 18500, height) * (.3 + .45 * broken);
+    auto weathered=WeatheringAt(x,z);
+    double exposed=std::max(weathered.bedrock,weathered.talus*.85);
     auto c=FinishClimate(BaseClimateAt(x,z,height),height);
     double sandSea=c.sand*Smooth(-.2,.35,ClimateNoise(x/47000-34,z/47000+19))
                    *(1-Smooth(.15,.55,GeographyAt(x,z).range));
     // Slip faces are loose sand, not exposed bedrock. True escarpments retain rock.
-    return std::clamp(std::max(cliff,alpine),0.,1.)*(1-.98*sandSea*(1-Smooth(.22,.40,1-normalY)));
+    return std::clamp(std::max({cliff,alpine,exposed}),0.,1.)*(1-.98*sandSea*(1-Smooth(.22,.40,1-normalY)));
 }
 
 inline Climate ClimateAt(double x, double z, double height, double footprint = 0);
@@ -293,11 +428,14 @@ inline double VegetationDensity(double x, double z, const Climate &c, double foo
     double copses=.035*Smooth(.2,.6,ClimateNoise(wx/2200+21,wz/2200+33))*(1-c.forest);
     double dry=.005+.019*Smooth(-.1,.5,ClimateNoise(wx/2600-15,wz/2600+42));
     double habitat=std::lerp(woodland+copses,dry,Smooth(.18,.65,c.sand));
-    return c.land*(1-c.snow)*habitat;
+    auto weathered=WeatheringAt(x,z);
+    double exposed=std::max(weathered.bedrock,weathered.talus*.65);
+    return c.land*(1-c.snow)*habitat*(1-.95*exposed);
 }
 inline double UnderstoryDensity(double x,double z,const Climate &c) {
     double patch=Smooth(-.05,.45,ClimateNoise(x/320+18,z/320-73));
-    return c.land*(1-c.snow)*(1-Smooth(.12,.55,c.sand))*(.04+.5*c.forest)*patch;
+    auto weathered=WeatheringAt(x,z);
+    return c.land*(1-c.snow)*(1-Smooth(.12,.55,c.sand))*(.04+.5*c.forest)*patch*(1-std::max(weathered.bedrock,weathered.talus*.8));
 }
 
 inline std::array<double, 4> SpeciesWeights(const Climate &c) {
@@ -324,14 +462,55 @@ struct DrainNode {
 inline double DuneHeight(double x,double z) {
     // Wind-aligned, asymmetric crests: long stoss slopes and shorter slip faces.
     // Large transverse dunes and smaller superimposed ripples have distinct scales.
-    double warp=420*ClimateNoise(x/7000+31,z/7000-19)+130*ClimateNoise(x/1800-7,z/1800+41);
+    double warp=2200*ClimateNoise(x/43000-11,z/43000+7)
+               +420*ClimateNoise(x/7000+31,z/7000-19)+130*ClimateNoise(x/1800-7,z/1800+41);
     double along=.89*x+.45*z+warp;
     auto dune=[](double phase) {
         double u=phase-std::floor(phase);
         return u<.78?Smooth(0,1,u/.78):1-Smooth(0,1,(u-.78)/.22);
     };
-    double height=(180+180*Smooth(-.3,.5,ClimateNoise(x/15000+51,z/15000-12))) * dune(along/1900);
-    return height+30*dune((along+120*ClimateNoise(x/900,z/900))/390);
+    double broken=Smooth(-.2,.4,ClimateNoise(x/61000+29,z/61000-64));
+    double patch=Smooth(-.45,.35,ClimateNoise(x/4300-19,z/4300+17));
+    double crest=std::lerp(dune(along/1900),dune((along+650*ClimateNoise(x/6200,z/6200))/1900)*patch,broken);
+    double height=(180+180*Smooth(-.3,.5,ClimateNoise(x/15000+51,z/15000-12))) * crest;
+    return height+30*dune((along+120*ClimateNoise(x/900,z/900))/390)*std::lerp(1.,patch,broken);
+}
+
+struct DryBasin { double x=0,z=0,radius=0,floor=0; };
+inline DryBasin DryBasinAt(double x,double z) {
+    constexpr double cell=42000;
+    auto ix=int64_t(std::floor(x/cell)),iz=int64_t(std::floor(z/cell));
+    static thread_local std::map<std::pair<int64_t,int64_t>,DryBasin> cache;
+    auto key=std::pair{ix,iz};
+    if(auto it=cache.find(key);it!=cache.end())return it->second;
+    DryBasin basin;
+    uint64_t seed=Mix(uint64_t(ix)^Mix(uint64_t(iz)+623109));
+    if(seed%5==0) {
+        double cx=(ix+.25+.5*double((seed>>8)&65535)/65535)*cell;
+        double cz=(iz+.25+.5*double((seed>>24)&65535)/65535)*cell;
+        auto g=GeographyAt(cx,cz);double h=MountainHeight(cx,cz);
+        if(std::hypot(cx,cz)>85000 && g.range<.08 && g.plateau<.15 && h>SeaLevel+250 && h<4500 && BaseClimateAt(cx,cz,h).aridity>.65) {
+            // Seek the existing valley bottom inside the owner's guard band.
+            // A random centre almost always falls on a slope, not a depression.
+            for(int step=0;step<9;++step) {
+                double stride=1800*std::pow(.75,step),bestX=cx,bestZ=cz,best=h;
+                for(int direction=0;direction<8;++direction) {
+                    double a=direction*6.28318530718/8;
+                    double px=std::clamp(cx+stride*std::cos(a),(ix+.2)*cell,(ix+.8)*cell);
+                    double pz=std::clamp(cz+stride*std::sin(a),(iz+.2)*cell,(iz+.8)*cell);
+                    double ph=MountainHeight(px,pz);
+                    if(ph<best){best=ph;bestX=px;bestZ=pz;}
+                }
+                cx=bestX;cz=bestZ;h=best;
+            }
+            double radius=3600+double((seed>>40)&2047),rim=1e30;
+            for(int i=0;i<8;++i){double a=i*6.28318530718/8;rim=std::min(rim,MountainHeight(cx+radius*1.3*std::cos(a),cz+radius*1.3*std::sin(a)));}
+            // Sediment fills a pre-existing depression; never stamp flat discs
+            // arbitrarily across slopes or mountain crests.
+            if(h>SeaLevel+100 && rim>h+20)basin={cx,cz,radius,h+.2*(rim-h)};
+        }
+    }
+    if(cache.size()>8192)cache.clear();cache.emplace(key,basin);return basin;
 }
 inline double DrylandHeight(double x, double z) {
     double base = MountainHeight(x, z);
@@ -341,9 +520,16 @@ inline double DrylandHeight(double x, double z) {
     // Sand seas occupy selected depositional basins; other deserts remain rocky.
     double erg=Smooth(-.2,.35,ClimateNoise(x/47000-34,z/47000+19));
     double basin=1-Smooth(.15,.55,GeographyAt(x,z).range);
-    double dunes=climate.sand*erg*basin*DuneHeight(x,z);
+    double coast=Smooth(SeaLevel-50,SeaLevel+180,base);
+    double dunes=climate.sand*erg*basin*coast*(1-Smooth(6200,7000,base))*DuneHeight(x,z);
     double wet=Smooth(.68,.9,climate.moisture)*(1-Smooth(50,300,base));
-    return base+fade*(dunes-.55*wet*std::max(0.,base));
+    double h=base+fade*(dunes-.55*wet*std::max(0.,base));
+    auto pan=DryBasinAt(x,z);
+    if(pan.radius) {
+        double blend=1-Smooth(pan.radius*.5,pan.radius*1.3,std::hypot(x-pan.x,z-pan.z));
+        h=std::lerp(h,pan.floor+1.5*ClimateNoise(x/700,z/700),blend);
+    }
+    return h;
 }
 
 struct Oasis {double x=0,z=0,radius=0,water=0;};
@@ -429,7 +615,9 @@ inline bool ChannelSegment(const DrainNode &a, const DrainNode &b) {
     if (b.height > a.height + 1e-8) {
         return false;
     }
-    int steps = std::max(1, int(std::ceil(std::hypot(b.x - a.x, b.z - a.z) / 64)));
+    // Check at the walking mesh spacing: eroded gullies can fall between the
+    // previous 64-unit samples and leave an otherwise downhill reach airborne.
+    int steps = std::max(1, int(std::ceil(std::hypot(b.x - a.x, b.z - a.z) / 32)));
     for (int i = 1; i < steps; ++i) {
         double t = double(i) / steps, water = std::lerp(a.height, b.height, t);
         double ground = DrainSurface(std::lerp(a.x, b.x, t), std::lerp(a.z, b.z, t));
@@ -854,7 +1042,7 @@ inline double NaturalHeightUncached(double x, double z, double spacing) {
         return base;
     }
     auto   river = RiverAt(x, z);
-    double influence = (1 - Smooth(river.width * .65, river.width + 180, river.distance)) * Smooth(3000, 4500, std::hypot(x, z)) * (1 - Smooth(64, 512, spacing));
+    double influence = (1 - Smooth(river.width + 64, river.width + 220, river.distance)) * Smooth(3000, 4500, std::hypot(x, z)) * (1 - Smooth(64, 512, spacing));
     double bed = river.water - 22 + 16 * Smooth(0, river.width, river.distance);
     return std::lerp(base, std::min(base, bed), influence);
 }

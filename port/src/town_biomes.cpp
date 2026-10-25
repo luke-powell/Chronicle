@@ -23,7 +23,7 @@ BiomeMesh PrepareMesh(std::vector<gfx::Vertex3D> vertices, std::vector<uint32_t>
 
 std::map<std::string, gfx::tim2::Uploaded>   textures;
 std::map<std::string, std::array<double, 3>> canopyColors;
-std::array<std::array<double, 3>, 5>         speciesCanopyColors{};
+std::array<std::array<double, 3>, 7>         speciesCanopyColors{};
 
 struct Source {
     std::vector<gfx::Vertex3D> vertices;
@@ -33,11 +33,11 @@ struct Source {
 
 std::vector<Source>                               trees;
 std::array<std::vector<Source>, 3>                regionalTrees;
-std::array<std::vector<Source>, 3>                undergrowth;
+std::array<std::vector<Source>, 4>                undergrowth;
 std::vector<Source>                               cacti;
 std::map<std::string, bool>                       requiredTextures;
-std::array<std::array<std::vector<Source>, 5>, 3> treeLods;
-std::array<float,5> treeHeights{};
+std::array<std::array<std::vector<Source>, 7>, 3> treeLods;
+std::array<float,7> treeHeights{};
 gfx::MeshHandle                                   treeIdentity = 0;
 
 uint32_t U32(const std::vector<uint8_t> &data, size_t offset) {
@@ -51,10 +51,11 @@ uint32_t U32(const std::vector<uint8_t> &data, size_t offset) {
 void MakeCanopyMips(gfx::tim2::Image &image) {
     // Area-filter premultiplied colour so distant trees leave coverage instead
     // of disappearing or becoming dark fringes at transparent texels.
-    while (image.levels.back().width > 1) {
+    while (image.levels.back().width > 1 || image.levels.back().height > 1) {
         const auto      &previous = image.levels.back();
         gfx::tim2::Level mip;
-        mip.width = mip.height = previous.width / 2;
+        mip.width = std::max(1u, previous.width / 2);
+        mip.height = std::max(1u, previous.height / 2);
         mip.pixels.resize(mip.width * mip.height * 4);
         for (unsigned z = 0; z < mip.height; z++) {
             for (unsigned x = 0; x < mip.width; x++) {
@@ -62,7 +63,7 @@ void MakeCanopyMips(gfx::tim2::Image &image) {
                 std::array<double, 3> rgb{};
                 for (int dz = 0; dz < 2; dz++) {
                     for (int dx = 0; dx < 2; dx++) {
-                        size_t i = ((z * 2 + dz) * previous.width + x * 2 + dx) * 4;
+                        size_t i = (std::min(z * 2 + dz,previous.height-1) * previous.width + std::min(x * 2 + dx,previous.width-1)) * 4;
                         double w = previous.pixels[i + 3];
                         a += w;
                         for (int k = 0; k < 3; k++) {
@@ -108,8 +109,11 @@ void LoadTextures(const char *town) {
             for (unsigned i = 0; i < count && 16 + (i + 1) * 48 <= size; i++) {
                 size_t      entry = begin + 16 + i * 48;
                 std::string name(reinterpret_cast<const char *>(data.data() + entry), strnlen(reinterpret_cast<const char *>(data.data() + entry), 32));
+                // Retail scene archives reuse names for different pixel data.
+                // Keep provenance in the key (s04/e02b02 is not e02/e02b02).
+                const std::string key = std::string(town) + "/" + name;
                 if (name != "e02b02" && name != "e04b01" && name != "e03b03" && name != "e03b07" &&
-                    !requiredTextures.contains(name) && name != "e02b18" && name != "s02b23" && name != "e03b04" && name != "e03b06" && name != "e04b10" && name != "e04b04") {
+                    !requiredTextures.contains(key) && name != "e02b18" && name != "s02b23" && name != "e03b04" && name != "e03b06" && name != "e04b10" && name != "e04b04") {
                     continue;
                 }
                 size_t offset = begin + U32(data, entry + 32);
@@ -169,7 +173,7 @@ void LoadTextures(const char *town) {
                         for (auto &c : sum) {
                             c /= weight;
                         }
-                        canopyColors[name] = sum;
+                        canopyColors[key] = sum;
                     }
                     // Queens' water tile contains a foam/beach strip in its lower half.
                     // Keep the original open-water texels as a repeatable surface.
@@ -179,7 +183,27 @@ void LoadTextures(const char *town) {
                             level.pixels.resize(size_t(level.width) * level.height * (decoded->format == gfx::TextureFormat::Index8 ? 1 : 4));
                         }
                     }
-                    textures[name] = gfx::tim2::Upload(*decoded);
+                    if (key=="e01/e01b01" || key=="e01/e01b06" || key=="e02/e02b21" || key=="e02/e02b02" || key=="e04/e04b01" || key=="e03/e03b03") {
+                        gfx::tim2::Image surface;
+                        gfx::tim2::Level base;
+                        base.width=level.width;base.height=level.height;
+                        base.pixels.resize(size_t(base.width)*base.height*4);
+                        for(size_t i=0;i<size_t(base.width)*base.height;++i) {
+                            uint32_t rgba;
+                            if(decoded->format==gfx::TextureFormat::Index8)rgba=decoded->palette[level.pixels[i]];
+                            else std::memcpy(&rgba,level.pixels.data()+i*4,4);
+                            std::memcpy(base.pixels.data()+i*4,&rgba,4);
+                        }
+                        // The Matataki cliff includes a grassy lip intended for the top
+                        // of a finite wall. Use its rock interior on unbounded faces.
+                        if(key=="e02/e02b21") {
+                            unsigned top=base.height/3;
+                            base.pixels.erase(base.pixels.begin(),base.pixels.begin()+size_t(top)*base.width*4);
+                            base.height-=top;
+                        }
+                        surface.levels.push_back(std::move(base));MakeCanopyMips(surface);
+                        textures[key]={UploadCanopy(surface),0};
+                    } else textures[key] = gfx::tim2::Upload(*decoded);
                 }
             }
         }
@@ -235,7 +259,7 @@ std::vector<Source> ReadTree(const char *town, const char *part, const char *fil
             Draw3DMul(product, reinterpret_cast<const float (*)[4]>(matrices[object.parent].data()), object.matrix);
             std::memcpy(matrix.data(), product, 64);
         }
-        if (filter && !std::strstr(object.name, filter)) {
+        if (filter && (filter[0]=='=' ? std::strcmp(object.name,filter+1)!=0 : !std::strstr(object.name, filter))) {
             continue;
         }
         size_t offset = object.data_ofs;
@@ -283,7 +307,7 @@ std::vector<Source> ReadTree(const char *town, const char *part, const char *fil
                 texture.assign(m.texture, strnlen(m.texture, 44));
             }
             Source source;
-            source.texture = texture;
+            source.texture = std::string(town) + "/" + texture;
             for (unsigned k = 0; k < n; k++, cursor += stride) {
                 float p[4], normal[4], uv[4];
                 if (!vec(h.vertex_ofs, U32(data, cursor), p) || !vec(h.normal[1], U32(data, cursor + 4), normal) || !vec(h.uv[1], U32(data, cursor + 8), uv)) {
@@ -369,7 +393,7 @@ bool Occupied(double x, double z) {
 // Low-poly silhouettes reuse the game's own stone texture and the colour
 // sampled from its foliage. These replace the old "desert tree" palm/stump mix.
 std::vector<Source> DesertModel(int species,int lod) {
-    Source out;out.texture=species==3?"canopy1":"e01b06";
+    Source out;out.texture=species==3?"canopy1":"e01/e01b06";
     auto tube=[&](float x,float y,float z,float radius,float height,int sides) {
         unsigned first=unsigned(out.vertices.size());
         for(int ring=0;ring<3;++ring)for(int i=0;i<sides;++i) {
@@ -448,6 +472,8 @@ const std::vector<forest::Tree> &TreePopulation(const terrain::Tile &tile) {
 }
 } // namespace
 
+gfx::TextureBinding BiomeSurfaceBinding(const char *name) { return Binding(name); }
+
 void BiomePrepare(CEditGround *ground) {
     if (textures.empty()) {
         regionalTrees[0] = ReadTree("e02", "e02t01");
@@ -455,12 +481,14 @@ void BiomePrepare(CEditGround *ground) {
         regionalTrees[2] = ReadTree("e04", "e04t01");
         cacti = ReadTree("e01", "e01t02", "e01t02_0");
         undergrowth[0] = ReadTree("e02", "e02t01", "ha__a40t");
-        undergrowth[1] = ReadTree("e02", "e02g05", "kusa");
+        undergrowth[1] = ReadTree("e01", "e01h01", "=kusa__A40N");
         undergrowth[2] = ReadTree("e03", "e03t01", "__a40by");
+        undergrowth[3] = ReadTree("e04", "e04m01", "=kusa__a40t");
         // Scene foliage may cover an entire original map. Give extracted clumps
         // a predictable physical footprint before scattering them independently.
-        const float widths[] = {55, 30, 22};
+        const float widths[] = {55, 30, 22, 38};
         for (size_t i = 0; i < undergrowth.size(); i++) {
+            std::fprintf(stderr, "biome understory: palette %zu sources %zu\n", i, undergrowth[i].size());
             float radius = 0;
             for (const auto &src : undergrowth[i]) {
                 for (const auto &v : src.vertices) {
@@ -476,11 +504,19 @@ void BiomePrepare(CEditGround *ground) {
                 }
             }
         }
-        const char *towns[] = {"e01", "e02", "e03", "e04", "e01"};
-        const char *parts[] = {"e01t01", "e02t01", "e03t02", "e04t01", "e01t02"};
+        const char *towns[] = {"e01", "e02", "e03", "e04", "e01", "e04", "e01"};
+        const char *parts[] = {"e01t01", "e02t01", "e03t02", "e04t01", "e01t02", "e04t01", "e01t02"};
         for (int lod = 0; lod < 3; lod++) {
-            for (int species = 0; species < 5; species++) {
-                treeLods[lod][species] = species>=3?DesertModel(species,lod):ReadTree(towns[species], parts[species], nullptr, lod);
+            for (int species = 0; species < 7; species++) {
+                treeLods[lod][species] = (species==3 || species==4)?DesertModel(species,lod):ReadTree(towns[species], parts[species], species==6?"e01t02_":nullptr, lod);
+                if (species == 4) {
+                    auto nativeRock = ReadTree("s04", "s04g02", "iwa03__s", lod);
+                    if (!nativeRock.empty()) {
+                        for (auto &source : nativeRock) for (auto &v : source.vertices)
+                            for (float &axis : v.position) axis *= .65f;
+                        treeLods[lod][species] = std::move(nativeRock);
+                    }
+                }
                 if (treeLods[lod][species].empty() && lod > 0) {
                     treeLods[lod][species] = treeLods[lod - 1][species];
                 }
@@ -492,12 +528,15 @@ void BiomePrepare(CEditGround *ground) {
                 std::fprintf(stderr, "forest model: species %d lod %d triangles %zu\n", species, lod, triangles);
             }
         }
-        requiredTextures["e01b06"]=true;
+        requiredTextures["e01/e01b06"]=true;
+        requiredTextures["e01/e01b01"]=true;
+        requiredTextures["e02/e02b21"]=true;
         LoadTextures("e01");
         LoadTextures("e02");
         LoadTextures("e03");
         LoadTextures("e04");
-        for (int species = 0; species < 5; species++) {
+        LoadTextures("s04");
+        for (int species = 0; species < 7; species++) {
             float low=1e20f,high=-1e20f;
             for(const auto &src:treeLods[0][species])for(const auto &v:src.vertices){low=std::min(low,v.position[1]);high=std::max(high,v.position[1]);}
             treeHeights[species]=high-low;
@@ -590,13 +629,13 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
     }
     result.waterU = float(std::fmod(t.left(), 350) / 350);
     result.waterV = float(std::fmod(t.top(), 350) / 350);
-    const char                               *names[] = {"e02b02", "e04b01", "e03b03"};
+    const char                               *names[] = {"e02/e02b02", "e04/e04b01", "e03/e03b03"};
     std::array<std::vector<gfx::Vertex3D>, 3> layers;
     bool                                      used[3]{};
 
     struct WaterVertex {
         gfx::Vertex3D v;
-        double        mask;
+        double        mask, ground, proximity;
     };
 
     for (auto v : vertices) {
@@ -607,6 +646,8 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
         double bank = (1 - terrain::Smooth(river.width + 35, river.width + 150, river.distance)) * fade;
         double beach=terrain::Smooth(terrain::SeaLevel-10,terrain::SeaLevel+10,h)*(1-terrain::Smooth(terrain::SeaLevel+50,terrain::SeaLevel+160,h));
         bank=std::max(bank,beach);
+        auto pan=terrain::DryBasinAt(x,z);
+        if(pan.radius)bank=std::max(bank,1-terrain::Smooth(pan.radius*.45,pan.radius*.8,std::hypot(x-pan.x,z-pan.z)));
         double soil=1-terrain::RockExposure(x,z,h,std::clamp(double(v.normal[1]),0.,1.));
         double weights[] = {climate.forest * fade * soil, climate.sand * fade * soil, bank * soil};
         for (int i = 0; i < 3; i++) {
@@ -653,7 +694,7 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
                 std::array<double,3> color{};
                 double count=1;
                 for(int k=0;k<3;++k) for(int species=0;species<4;++species)
-                    color[k]+=speciesWeights[species]*speciesCanopyColors[species][k];
+                    color[k]+=speciesWeights[species]*(species==2?.5*(speciesCanopyColors[2][k]+speciesCanopyColors[5][k]):speciesCanopyColors[species][k]);
                 double coverage = (1 - std::exp(-density * std::lerp(3.5,.22,c.sand))) * terrain::Smooth(2200, 3500, std::hypot(x, z));
                 size_t pixel = (iz * size + ix) * 4;
                 for (int k = 0; k < 3; k++) {
@@ -681,7 +722,7 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
     {
         // Water has its own sampling rate. A distant terrain vertex must never
         // drag a river's surface towards the elevation of an unrelated catchment.
-        const int n=t.level<=3?int(t.size()/64):int(std::sqrt(double(vertices.size())))-1;
+        const int n=int(std::sqrt(double(vertices.size())))-1;
         const double waterStep=t.size()/n;
         std::vector<WaterVertex> water;
         for (int z = 0; z <= n; z++) {
@@ -697,11 +738,12 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
                 w.color[1] = 119;
                 w.color[2] = 128;
                 w.color[3] = 100;
-                double ground=terrain::Height(wx,wz,waterStep);
+                // Clip against the actual supporting triangles, including LOD edges.
+                double ground=vertices[z*(n+1)+x].position[1];
                 double ocean=terrain::SeaLevel-ground;
                 double channel=std::min({river.width-river.distance,river.water-ground,std::hypot(wx,wz)-3300});
                 if(ocean>channel){w.position[1]=float(terrain::SeaLevel);w.color[0]=64;w.color[1]=106;w.color[2]=128;w.color[3]=120;}
-                water.push_back({w,std::max(ocean,channel)});
+                water.push_back({w,std::max(ocean,channel),ground,std::max(ocean,river.width-river.distance)});
             }
         }
         std::vector<uint32_t> waterIndices;
@@ -713,31 +755,50 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
         }
         std::vector<gfx::Vertex3D> verts;
         std::vector<uint32_t>      inds;
-        for (size_t i = 0; i < waterIndices.size(); i += 3) {
+        auto midpoint=[&](const WaterVertex &a,const WaterVertex &b) {
+            WaterVertex p=a;
+            for(int axis=0;axis<3;++axis)p.v.position[axis]=(a.v.position[axis]+b.v.position[axis])*.5f;
+            p.ground=(a.ground+b.ground)*.5;
+            double wx=t.left()+p.v.position[0],wz=t.top()+p.v.position[2];
+            auto r=terrain::RiverAt(wx,wz);
+            double ocean=terrain::SeaLevel-p.ground;
+            double channel=std::min({r.width-r.distance,r.water-p.ground,std::hypot(wx,wz)-3300});
+            p.v.position[1]=float(ocean>channel?terrain::SeaLevel:r.water+.2);
+            p.mask=std::max(ocean,channel);p.proximity=std::max(ocean,r.width-r.distance);
+            return p;
+        };
+        auto emitWater=[&](auto &&self,const WaterVertex &a,const WaterVertex &b,const WaterVertex &c,int depth)->void {
+            double edge=std::max({std::hypot(a.v.position[0]-b.v.position[0],a.v.position[2]-b.v.position[2]),
+                                 std::hypot(a.v.position[0]-c.v.position[0],a.v.position[2]-c.v.position[2]),
+                                 std::hypot(b.v.position[0]-c.v.position[0],b.v.position[2]-c.v.position[2])});
+            // Refine only shore/channel triangles, not every dry cell or ocean
+            // tile. Water is clipped against the same supporting terrain plane.
+            if(t.level<=3 && depth<2 && edge>16 && std::min({a.mask,b.mask,c.mask})<0 &&
+               std::max({a.proximity,b.proximity,c.proximity})>-edge) {
+                auto ab=midpoint(a,b),bc=midpoint(b,c),ca=midpoint(c,a);
+                self(self,a,ab,ca,depth+1);self(self,ab,b,bc,depth+1);
+                self(self,ca,bc,c,depth+1);self(self,ab,bc,ca,depth+1);return;
+            }
+            std::array<WaterVertex,3> triangle{a,b,c};
             std::vector<WaterVertex> polygon;
             for (int k = 0; k < 3; k++) {
-                auto a = water[waterIndices[i + k]], b = water[waterIndices[i + (k + 1) % 3]];
-                if (a.mask >= 0) {
-                    polygon.push_back(a);
-                }
-                if ((a.mask >= 0) != (b.mask >= 0)) {
-                    double f = a.mask / (a.mask - b.mask);
-                    auto   p = a;
-                    for (int axis = 0; axis < 3; axis++) {
-                        p.v.position[axis] = float(std::lerp(double(a.v.position[axis]), double(b.v.position[axis]), f));
-                    }
-                    polygon.push_back(p);
+                auto p = triangle[k], q = triangle[(k+1)%3];
+                if (p.mask >= 0)polygon.push_back(p);
+                if ((p.mask >= 0) != (q.mask >= 0)) {
+                    double f = p.mask / (p.mask - q.mask);
+                    auto r=p;
+                    for(int axis=0;axis<3;++axis)r.v.position[axis]=float(std::lerp(double(p.v.position[axis]),double(q.v.position[axis]),f));
+                    polygon.push_back(r);
                 }
             }
-            for (size_t k = 1; k + 1 < polygon.size(); k++) {
-                for (auto p : {polygon[0], polygon[k], polygon[k + 1]}) {
-                    inds.push_back(unsigned(verts.size()));
-                    verts.push_back(p.v);
-                }
+            for(size_t k=1;k+1<polygon.size();++k)for(auto p:{polygon[0],polygon[k],polygon[k+1]}) {
+                inds.push_back(unsigned(verts.size()));verts.push_back(p.v);
             }
-        }
+        };
+        for(size_t i=0;i<waterIndices.size();i+=3)
+            emitWater(emitWater,water[waterIndices[i]],water[waterIndices[i+1]],water[waterIndices[i+2]],0);
         if (!inds.empty()) {
-            result.water = PrepareMesh(std::move(verts), inds, "e03b07");
+            result.water = PrepareMesh(std::move(verts), inds, "e03/e03b07");
         }
     }
     if (t.level <= 1 && !undergrowth[0].empty()) {
@@ -763,6 +824,7 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
                     auto   river = terrain::RiverAt(x, z);
                     double density=terrain::VegetationDensity(x,z,c);
                     if(layer==1) density=terrain::UnderstoryDensity(x,z,c);
+                    if(layer==1 && c.sand>.55) density=.003*c.land*(1-c.snow);
                     if (layer == 2) {
                         density *= .42;
                     }
@@ -782,7 +844,7 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
                     double      cs = std::cos(angle) * scale, sn = std::sin(angle) * scale;
                     int         species = c.sand > .4 ? 2 : c.temperature > .64 ? 1
                                                                                 : (c.forest > .65 && ((seed >> 20) & 3) != 0 ? 0 : -1);
-                    int         groundSpecies = int((seed >> 21) % 3);
+                    int         groundSpecies = c.sand>.55 ? 3 : c.forest>.65 ? int((seed>>21)%2) : 1+int((seed>>21)%2);
                     const auto &model = layer == 1 ? undergrowth[groundSpecies] : layer == 2 && c.sand > .4 && (seed & 1)       ? cacti
                                                                               : species >= 0 && !regionalTrees[species].empty() ? regionalTrees[species]
                                                                                                                                 : trees;
@@ -898,6 +960,7 @@ void BiomeDraw(const BiomeChunk &chunk, gfx::MeshConstants constants, gfx::DrawS
     overlay.depth_test = gfx::DepthTest::GEqual;
     constants.flags = gfx::kMeshLit | gfx::kMeshAtmosphere | gfx::kMeshVertexColor;
     if (pass == 0) {
+        constants.flags |= gfx::kMeshWorldUv | gfx::kMeshTerrainTriplanar;
         for (auto &m : chunk.ground) {
             gfx::DrawMesh(m.mesh, 0, m.count, constants, Binding(m.texture), overlay, &transform);
         }
@@ -957,4 +1020,3 @@ void BiomeDraw(const BiomeChunk &chunk, gfx::MeshConstants constants, gfx::DrawS
         gfx::DrawMesh(chunk.water.mesh, 0, chunk.water.count, constants, Binding(chunk.water.texture), overlay, &transform);
     }
 }
-

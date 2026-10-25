@@ -770,6 +770,19 @@ PORT_OVERRIDE int EditLoop() {
     TownZoomEnd();
     TownMouseApply(NowCamera, pEditGround, MapNo, GameMode);
 
+    // Reproducible ground-level visual checks, opt-in only for preview runs.
+    // Values are world eye X/Z followed by a world look-at X/Y/Z.
+    if (TownTerrainEnabled(pEditGround) && std::getenv("DC_WORLD_PREVIEW_SITE")) {
+        if (const char *shot = std::getenv("DC_WORLD_PREVIEW_GROUND_CAMERA")) {
+            double x, z, tx, ty, tz;
+            if (std::sscanf(shot, "%lf,%lf,%lf,%lf,%lf", &x, &z, &tx, &ty, &tz) == 5) {
+                NowCamera->SetPos(nullptr, world::LocalX(x), float(terrain::SurfaceHeight(x,z)+16), world::LocalZ(z));
+                NowCamera->SetRef(world::LocalX(tx), float(ty), world::LocalZ(tz));
+                NowCamera->CCamera::Step(-1);
+            }
+        }
+    }
+
     sceVu0FMATRIX view;
     sceVu0FVECTOR eye;
 
@@ -1303,7 +1316,10 @@ void EditMainDraw() {
 
         if (EdDrawOffMap == 0) {
             if (draw_sky != 0) {
-                EdDrawSky(NowTime, SkyFrame, SunFrame, SkyBackFrame, NowCamera, EditMapInfo->sky_follow);
+                // The procedural landscape can rise above the retail town sky dome.
+                int landscapeSkyFollow[3] = {1, 1, 1};
+                EdDrawSky(NowTime, SkyFrame, SunFrame, SkyBackFrame, NowCamera,
+                          TownTerrainEnabled(pEditGround) ? landscapeSkyFollow : EditMapInfo->sky_follow);
             }
 
             TexManager.ReloadTexture(Vif1Packet, 1);

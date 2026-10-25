@@ -15,8 +15,10 @@ int main() {
              DrainKey{305,       -350      },
              DrainKey{488281250, -488281250}
     }) {
-        for (int z = -4; z <= 4; ++z) {
-            for (int x = -4; x <= 4; ++x) {
+        // Cover a broader drainage neighbourhood after changing the relief;
+        // retain the minimum number of independently validated reaches.
+        for (int z = -5; z <= 5; ++z) {
+            for (int x = -5; x <= 5; ++x) {
                 DrainKey key{origin.first + x, origin.second + z};
                 auto     reach = DrainReach(key.first, key.second);
                 if (reach.lake || reach.width == 0) {

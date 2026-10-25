@@ -1,0 +1,94 @@
+Terrain combination review - 2026-10-24
+
+Sources and decisions
+1. No Man's Sky: GDC, Continuous World Generation (Innes McKendrick).
+https://www.youtube.com/watch?v=sCRzxEEcO2Y
+Architecture reference for continuous procedural worlds, not a claim that our
+height-field renderer reproduces its planetary density system.
+
+2. Ian Parberry, Modeling Real-World Terrain with Exponentially Distributed Noise.
+https://jcgt.org/published/0004/02/01/paper.pdf
+https://ianparberry.com/research/tobler/
+Uses measured terrain gradients to motivate varied noise gradients. The author
+identifies this as an influence cited by Sean Murray. Our regression measures
+both gentle and steep terrain; we have not implemented Parberry's algorithm.
+
+3. Mojang, 1.18 experimental world generation notes; Henrik Kniberg's overview.
+https://www.minecraft.net/en-us/article/new-world-generation-java-available-testing
+https://www.youtube.com/watch?v=CSa5O6knuwI
+Mojang separates terrain shape from biome identity and iterates on biome scale,
+mountain placement and river integration. We retain independent geography,
+climate, substrate, vegetation and drainage fields, with continuous blending.
+The YouTube page supplied metadata, not an accessible full transcript.
+
+4. Sebastian Lague, Hydraulic Erosion demonstration and source.
+https://github.com/SebLague/Hydraulic-Erosion
+https://www.youtube.com/watch?v=eaXk97ujbPQ
+Particle erosion is useful for understanding sediment transport. A bounded
+heightmap simulation does not directly solve our unbounded, independently
+sampled chunks, so we did not paste a droplet simulation into each chunk.
+
+5. Rune Skovbo Johansen, Fast and Gorgeous Erosion Filter, with Clay John and
+Felix Westin's earlier demonstrations linked from the article.
+https://blog.runevision.com/2026/03/fast-and-gorgeous-erosion-filter.html
+Gradient-directed local kernels create gullies; later octaves follow the changed
+gradient, producing branching. We independently implement a compact four-scale
+cosine-kernel variant with bounded amplitude and zero-slope fading. This is an
+appearance model, not mass-conserving erosion. No source shader was copied.
+Real rivers still use separately validated downhill routes.
+
+6. National Park Service, Glacier National Park glacial geology.
+https://www.nps.gov/glac/learn/nature/glacial-geology.htm
+Reference for broad valley floors, steep walls, hanging valleys, horns, debris
+and cirques. Avoid making every slope uniformly smooth or every peak a needle.
+Our terrain combines broad valleys and shoulders, ridge groups, local rock
+faces, slope-directed gullies and debris placement. It does not simulate ice.
+
+Review criteria
+- Compare the same ground-level viewpoint, not just an attractive overhead map.
+- Inspect multiple sites and directions, plus nearby ground and distant LOD.
+- Preserve substantial gentle terrain between steeper exposed faces.
+- Verify rivers against final geometry, not the pre-detail height field.
+- Check texture repetition, silhouette resolution and lighting independently.
+- Numerical suites support visual inspection; they cannot certify aesthetics.
+
+Implementation and review updates
+- Ridge frequencies are independent of the continental envelope. A 5.5 km
+  principal ridge scale carries smaller spurs, with broad valley-floor masks
+  and local resistant strata. Directed gullies use four spatial scales.
+- The wall texture e02/e02b21 has a baked grassy lip. Its rock interior is used
+  on terrain faces. Random rotations/phases blend continuously per tile, in
+  chunk-relative coordinates with periodic hashing so origin rebases agree.
+  Norune ground retains the original 200-unit repeat scale and complete mips.
+- The sky follows all camera axes only in procedural Norune; retail sky assets
+  no longer sit below elevated viewpoints. Atmospheric extinction is unchanged.
+- Near terrain and water now share the same triangle grid. Shore clipping uses
+  the actual terrain vertices, including stitched edges, rather than an unrelated
+  height sample. LOD seam checks cover the renderer's varying grid resolutions.
+- Cold terrain generation uses at most eight independent CPU workers, each with
+  its own terrain/drainage/population caches and snapshots of Georama edits.
+  GPU uploads remain on the render thread. Whole initial coverage is published
+  together, including trees. Subsequent streaming retains its bounded queue.
+- tools/test_mountain_previews.py captures full scenes from 1.6 m above the
+  walking surface in isolated saves. Diagnostic captures are explicitly separate.
+- River coverage sampling was expanded from 9x9 to 11x11 neighbourhoods: the
+  terrain changed which reaches exist. Minimum exercised-channel assertions and
+  physical validity checks were retained. The new sample validates 81 reaches
+  and 1845 descending segments.
+
+Final shape refinement
+The initial erosion appearance was too weak on the second inspected range.
+Small crag noise was also rotating the drainage orientation. MountainForm now
+retains its structural height separately; the erosion direction derives from
+that field. A bounded nonlinear channel profile concentrates incision instead
+of uniformly corrugating the face. Steep slopes receive larger cuts; gentle
+terrain retains low amplitude. The morphology sample retains about 63 percent
+gentle uplands and 17 percent cliff slopes, with a 2.43 km maximum sampled peak.
+These are procedural landforms, not a claim of a calibrated geomorphic model.
+
+Water review refinement
+Matching the base grids exposed narrow-channel aliasing. Shore triangles now
+subdivide locally before clipping, using the original supporting terrain plane
+for every new sample. The carved bed has a bank margin that keeps the coarser
+supporting chords below narrow channels. Ocean interiors and dry cells are not
+uniformly subdivided. Actual rendered water still requires visual inspection.

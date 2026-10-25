@@ -26,6 +26,7 @@ struct BiomeChunk {
 };
 
 void       BiomePrepare(CEditGround *ground);
+gfx::TextureBinding BiomeSurfaceBinding(const char *name);
 BiomeChunk BiomeBuild(const terrain::Tile &, const std::vector<gfx::Vertex3D> &, const std::vector<uint32_t> &);
 bool       BiomeUpload(BiomeChunk &, std::chrono::steady_clock::time_point deadline);
 void       BiomeDestroy(BiomeChunk &);

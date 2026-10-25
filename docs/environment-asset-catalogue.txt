@@ -1,0 +1,94 @@
+Retail environment asset catalogue - 2026-10-24
+
+Local visual catalogue: port/run/asset-catalog/index.html
+Machine-readable inventory: catalog.json, textures.csv, models.csv in that folder.
+Reviewed surface contact sheet: reviewed-surfaces.png.
+The generated folder contains locally extracted retail assets and stays ignored.
+Rebuild with:
+  python tools/catalog_environment.py
+  python tools/enrich_environment_catalog.py
+
+Coverage
+1,406 source files inspected, including town scenes and interiors, event scenes,
+room data, dungeon map packs and environment texture packs. The explicit snow
+exception includes dun/item/main_data/icebig.img. Character, monster, menu and
+general item directories are excluded, as recorded in the inventory.
+5,244 texture occurrences; 2,124 distinct decoded pixel images.
+24,234 drawable MDS object occurrences; 10,029 distinct mesh byte hashes.
+Repeated day/night, scene, and LOD occurrences remain individually traceable.
+The primary IMG extraction decoded every indexed entry without a decode error.
+These counts are NOT counts of unique plants or independently placeable props.
+
+Each model includes source container, MDS offset, object index/name, scene part,
+material texture names, vertex/triangle counts, transformed bounds, geometry
+preview and approximate horizontal/vertical area. Texture records include the
+source offset, dimensions, pixel hash and preview. Geometry/material associations
+help find ground/walls, but mixed atlases still require UV inspection. Standalone
+TIM2 fallback names retain file/offset identity rather than invented asset names.
+
+Verified and actionable vegetation
+- Norune e01t01: multi-trunk tree with canopy cards, bark and ground decal.
+  Already used, with original LODs. Ground decal excluded from scatter geometry.
+- Matataki e02t01: trunk, canopy, lower foliage and shadow. Already used as a
+  forest tree; ha__a40t supplies small ground foliage.
+- Queens e03t02: palm trunk/fronds, plus an excluded ground square.
+  Already used in tropical/coastal/oasis niches.
+- Muska Lacka e04t01: distinct palm crown and trunk. Now a second tropical
+  silhouette in the same persistent forest population, including every LOD.
+- Norune e01h01 / kusa__A40N: ground foliage clumps, extracted without the house.
+  Now used for meadow understory instead of scattering Matataki's vine panels.
+- Queens e03t01 / __a40by: ground vegetation cards, already used.
+- Muska Lacka e04m01 / kusa__a40t: radial ground foliage clumps using e04b11.
+  Now rare dry-ground plants; core deserts remain overwhelmingly bare.
+- Norune e01t02 / e01t02_0: dead branch clusters, NOT a cactus. Now occasional
+  woodland debris. Ground/shadow cards excluded. No confirmed separate fallen
+  log mesh has yet been identified; generic object names prevent ruling it out.
+- Matataki tuta__a7f / e02b16: wall-hugging vines. Catalogued for support-aware
+  placement, not indiscriminately scattered on open ground.
+
+Flowers, bushes and ambiguous names
+- hana__C in gedit/e01/in/0101/0101.scn and s05/s06 interiors has petal geometry
+  and s050102 material. This is an interior flower arrangement candidate, not
+  yet a verified rooted wildflower suitable for meadow scatter.
+- hanabira1/2 in opdat/norn4/seirei2.pak are petal effects, not rooted flora.
+- kusari means chain; those entries are explicitly excluded from grass tags.
+- Low foliage clumps and canopy pieces exist, but the catalogue does not invent
+  bush species or flower species for anonymous mesh names.
+- No verified retail cactus was found. Current cactus geometry is procedural,
+  coloured from retail foliage; it is labelled separately from native assets.
+
+Rocks
+- s04 / s04g02 / iwa03__s: compact 110-triangle natural boulder with original
+  e02t10 UVs. Now replaces the procedural boulder in dryland scatter.
+- iwa01 and iwa02: different large forms (including a supported slab silhouette);
+  retained for visual review rather than treating every 'iwa' as a loose rock.
+- s29 / s29b01 / rock1..9 with s29b05: enormous scene-scale cliff formations,
+  measured thousands of units across. These are candidates for landmark geology,
+  not small pebbles. Catalogue bounds make the distinction explicit.
+
+Reviewed ground/wall materials (21 named tiles/atlases)
+Norune: e01b06 natural rock/cliff.
+Matataki: e02b02/e02b03 grass ground, e02b05 grass-to-cliff atlas, e02b06 rough
+cliff, e02b21 pale rock, e02b16 vines, e02b18 foliage.
+Queens: e03b03 pale sand, e03b04 palm/bark atlas, e03b05 stone, e03b07 shoreline
+water atlas, e03b09 grass/sand transition, e03b10 grass decal.
+Muska Lacka: e04b01/e04b02 sand variants, e04b04 foliage/bark, e04b05 sparse dry
+grass, e04b10 fronds, e04b11 radial ground foliage, e04b12 pale cliff stone.
+Snow: icebig.img remains the user-selected native snow cap source.
+The full inventory also includes dungeon floor/wall tiles and architecture,
+without prematurely claiming all masonry, mixed atlases or effect images are
+tileable natural terrain. Search source paths such as dun/mpd_pack or names d02b.
+
+Integration policy
+Texture names are only unique within their source scene. For example, e02b02
+in gedit/e02/img.pak is grass, while the same name in gedit/s04/img.pak is a
+sandy scene surface with a baked circular shadow. Runtime imported materials
+must retain scene/name keys; bare-name maps silently replace ground materials
+when additional assets load. Native model UVs resolve within their own scene.
+
+Use assets where ecology, scale and original UVs fit. Retain a complete distant
+representation for new woody/rock scatter. Reuse existing population candidates
+and texture batches rather than adding unconstrained scatter layers. Keep vines
+on supports and architectural pieces out of wilderness material palettes.
+The catalogue is complete for its stated scanned environment scope; semantic
+identification of every anonymous object is explicitly still incomplete.

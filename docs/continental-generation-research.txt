@@ -59,11 +59,12 @@ Implementation
   upwind barriers and elevation cooling. Smooth ecological weights remain.
 - Sand fields have warped, wind-aligned asymmetric crests and smaller superimposed
   dunes. Slip faces retain sand; sufficiently steep bedrock cliffs retain rock.
-- Core deserts select cactus/rock geometry only, with low density and no grass
-  clumps. New procedural low-poly cactus and boulder silhouettes use colour
-  sampled from retail foliage and the original e01b06 stone texture. The existing
-  Dark Cloud palm assets are reserved for suitable wet/tropical locations.
-  These are new silhouettes, not falsely identified retail cactus assets.
+- Core deserts use sparse cacti, native boulders and very rare Muska Lacka
+  ground foliage. Procedural cactus geometry uses colour sampled from retail
+  foliage; it is not falsely labelled a native cactus. The catalogue identified
+  s04g02/iwa03__s as a native boulder, now replacing the procedural rock fallback.
+  Queens and Muska Lacka palms share wet/tropical/oasis niches. Rare Norune
+  dead branch clusters occur in woodland, not as desert cactus substitutes.
 - Rainfall minus evaporation/seasonal losses supplies runoff; the universal
   baseflow was removed. Imported upstream runoff can still feed dry reaches.
   River mouths join the sea instead of shrinking to a zero-width point.
@@ -87,9 +88,9 @@ populated land, so an empty ocean cannot make a tree ownership test pass trivial
 
 Representative sites (world X,Z):
 - Sand sea with cactus and boulders: -50000,0
-- Oasis centre: -157722.980,23665.164
+- Oasis centre: -163549.851,139021.035
 - Forested tableland and clearings: -3906,-113281
-- Western shoreline: -207031,121094
+- Western coastal lowland: -207031,121094 (above sea level; not the waterline)
 - Mountain belt: -125000,70312
 - Incised tableland: -52000,-20000
 
@@ -100,3 +101,31 @@ it is not a complete continent-wide discharge solution. The ocean is a rendered
 surface, not a new swimming or sailing system. Cold world generation is still
 substantial. Existing saved foundations retain their heights and world positions,
 so regenerated wilderness can be higher or lower than their old surroundings.
+
+Second landform pass after the retail asset audit
+- Broader wind-field warping and regional broken-crest masks vary dune rhythm.
+  Dunes fade smoothly at the coast and their upper elevation limit.
+- Rare sediment-filled desert basins locate actual depressions with a bounded
+  local descent, then verify an enclosing rim. Their centres are nearly flat,
+  their margins blend continuously, and native pale sand marks the dry floor.
+  Seven valid basins occur in the 49-by-49 ownership-cell test area. These are
+  analytical sediment surfaces, not a claim to simulate alluvial transport.
+- Desert landform reference: https://home.nps.gov/subjects/geology/arid-landforms.htm
+  https://pubs.usgs.gov/of/2004/1007/fans.html
+- Mountain interpretation reference: https://www.nps.gov/glac/learn/nature/glacial-geology.htm
+  Wide valley floors, steep valley walls and hanging shoulders should be judged
+  together in local views; summit height alone does not establish realism.
+- All six kernel suites pass after the second pass: continental/ecology coverage,
+  exact forest population ownership, climate continuity, mountain morphology,
+  downhill river geometry and terrain/foundation seams. After the rock-weathering
+  pass, the river suite checks 62 reaches and 1,459 descending segments. Previews are kept locally
+  alongside the atlas in port/run/mod-tests/integration.
+
+Hill and mountain weathering
+- See rock-weathering-research.txt for papers, implementation and limitations.
+- Actual geometry now adds locally flatter resistant shoulders, broken faces
+  and downslope debris at both hill and mountain scales. Native boulders use
+  the existing deterministic population/LOD path. Exposed faces have less flora.
+- Seven kernel suites pass, including the new rock-site and continuity suite.
+- Cold generation remains expensive; do not interpret low per-frame terrain
+  update times as instant loading or a guarantee of total frame rate.

@@ -25,6 +25,18 @@ int main() {
   if(std::hypot(o.x,o.z)<nearest){nearest=std::hypot(o.x,o.z);std::printf("oasis site %.3f %.3f radius %.0f water %.0f\n",o.x,o.z,o.radius,o.water);}
  }
  assert(oases>2&&oases<150);
+ int pans=0;
+ for(int iz=-24;iz<=24;++iz)for(int ix=-24;ix<=24;++ix) {
+  auto pan=DryBasinAt((ix+.5)*42000,(iz+.5)*42000);if(!pan.radius)continue;++pans;
+  double center=DrylandHeight(pan.x,pan.z);
+  assert(std::abs(center-pan.floor)<2);
+  for(int k=0;k<8;++k) {
+   double a=k*6.28318530718/8;
+   assert(std::abs(DrylandHeight(pan.x+pan.radius*.3*std::cos(a),pan.z+pan.radius*.3*std::sin(a))-center)<3);
+  }
+  if(pans==1)std::printf("playa site %.0f %.0f radius %.0f floor %.0f\n",pan.x,pan.z,pan.radius,pan.floor);
+ }
+ assert(pans>0&&pans<80);std::printf("PASS %d rare dry basin floors\n",pans);
  std::printf("sand sea site %d %d\n",duneSite.first,duneSite.second);
  for(auto p:{std::pair{39062.,-82031.},std::pair{-11718.,89843.},std::pair{-82031.,39062.}}) {
   auto c=FinishClimate(BaseClimateAt(p.first,p.second,LandHeight(p.first,p.second)),LandHeight(p.first,p.second));
