@@ -2,6 +2,8 @@
 #include "gfx/capture.hpp"
 #endif
 #include "dran_flight.hpp"
+#include "forest_town.hpp"
+#include "forest_georama.hpp"
 #include "town_mobs.hpp"
 #include "world_origin.hpp"
 
@@ -136,6 +138,8 @@ void Assign(float *p, Position v) {
 }
 
 void Reset() {
+    ForestGeoramaReset();
+    ForestTownReset();
     TownMobsReset();
     DranFlightReset();
     originX = originZ = 0;
@@ -370,7 +374,7 @@ void Load(const std::filesystem::path &dir) {
 }
 
 void Capture() {
-    if (active && TownTerrainEnabled(pEditGround)) {
+    if (active && TownTerrainEnabled(pEditGround) && !ForestGeoramaActive()) {
         savedParts = nlohmann::json::array();
         for (auto &p : pEditGround->parts) {
             if (p.handle >= 0) {

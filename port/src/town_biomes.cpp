@@ -23,7 +23,7 @@
 
 namespace {
 BiomeMesh PrepareMesh(std::vector<gfx::Vertex3D> vertices, std::vector<uint32_t> indices, std::string texture = {}) {
-    return {0, unsigned(indices.size()), std::move(texture), std::move(vertices), std::move(indices)};
+    return {0, unsigned(indices.size()), std::move(texture), {}, std::move(vertices), std::move(indices)};
 }
 
 std::map<std::string, gfx::tim2::Uploaded>   textures;
@@ -34,6 +34,8 @@ struct Source {
     std::vector<gfx::Vertex3D> vertices;
     std::vector<uint32_t>      indices;
     std::string                texture;
+    std::string                object;
+    std::string                path;
 };
 
 std::vector<Source>                               trees;
@@ -107,7 +109,7 @@ gfx::TextureHandle UploadCanopy(const gfx::tim2::Image &image) {
     return texture;
 }
 
-void LoadTextures(const char *town) {
+void LoadTextures(const char *town, bool sceneModel=false) {
     std::ifstream        file(PathsDataRoot() / "gedit" / town / "img.pak", std::ios::binary);
     std::vector<uint8_t> data((std::istreambuf_iterator<char>(file)), {});
     for (size_t cursor = 0; cursor + 76 <= data.size() && data[cursor];) {
@@ -123,7 +125,8 @@ void LoadTextures(const char *town) {
                 std::string name(reinterpret_cast<const char *>(data.data() + entry), strnlen(reinterpret_cast<const char *>(data.data() + entry), 32));
                 // Retail scene archives reuse names for different pixel data.
                 // Keep provenance in the key (s04/e02b02 is not e02/e02b02).
-                const std::string key = std::string(town) + "/" + name;
+                const std::string key = (sceneModel?"scene/":"") + std::string(town) + "/" + name;
+                if(textures.contains(key))continue;
                 if (name != "e02b02" && name != "e04b01" && name != "e03b03" && name != "e03b07" &&
                     !requiredTextures.contains(key) && name != "e02b18" && name != "s02b23" && name != "e03b04" && name != "e03b06" && name != "e04b10" && name != "e04b04") {
                     continue;
@@ -133,12 +136,16 @@ void LoadTextures(const char *town) {
                     continue;
                 }
                 std::vector<uint8_t> image(data.begin() + offset, data.begin() + begin + size);
-                size_t               reserved = U32(image, 16);
-                if (reserved < 1024 * 1024 && reserved + 16 > image.size()) {
-                    image.resize(reserved + 16);
+                // Some IM2 entries store the VRAM reservation (RGBA size),
+                // not the serialized indexed-image size, in total_size.
+                if(image.size()>=64 && image[5]==0 && image[6]==1 && image[7]==0){
+                    uint16_t header=0;std::memcpy(&header,image.data()+28,2);
+                    uint32_t serialized=header+U32(image,20)+U32(image,24);
+                    if(serialized<=image.size()-16)std::memcpy(image.data()+16,&serialized,4);
                 }
                 auto pictures = gfx::tim2::Parse(image);
                 if (!pictures || pictures->empty()) {
+                    std::fprintf(stderr,"biome texture parse failed: %s offset=%zu bytes=%zu\n",key.c_str(),offset,image.size());
                     continue;
                 }
                 auto             &p = (*pictures)[0];
@@ -196,7 +203,7 @@ void LoadTextures(const char *town) {
                             level.pixels.resize(size_t(level.width) * level.height * (decoded->format == gfx::TextureFormat::Index8 ? 1 : 4));
                         }
                     }
-                    if (key=="e01/e01b01" || key=="e01/e01b05" || key=="e01/e01b06" || key=="e02/e02b21" || key=="e02/e02b02" || key=="e04/e04b01" || key=="e03/e03b03") {
+                    if (key=="e01/e01b01" || key=="e01/e01b05" || key=="e01/e01b06" || key=="e02/e02b21" || key=="e02/e02b02" || key=="e04/e04b01" || key=="e03/e03b03" || name=="e01b20" || name=="e02b02") {
                         gfx::tim2::Image surface;
                         gfx::tim2::Level base;
                         base.width=level.width;base.height=level.height;
@@ -224,7 +231,7 @@ void LoadTextures(const char *town) {
     }
 }
 
-std::vector<Source> ReadTree(const char *town, const char *part, const char *filter = nullptr, int lod = 0) {
+std::vector<Source> ReadTree(const char *town, const char *part, const char *filter = nullptr, int lod = 0, bool sceneModel = false) {
     // Read the original static scene resource directly into immutable render geometry.
     // No Georama slots, texture-manager slots, or retail model arenas are consumed.
     std::ifstream        file(PathsDataRoot() / "gedit" / town / "scene.scn", std::ios::binary);
@@ -234,10 +241,10 @@ std::vector<Source> ReadTree(const char *town, const char *part, const char *fil
         if (entry + 48 > scene.size()) {
             break;
         }
-        if (std::strncmp(reinterpret_cast<const char *>(scene.data() + entry), part, 16)) {
-            continue;
-        }
         size_t begin = U32(scene, entry + 16), size = U32(scene, entry + 20);
+        bool extra=sceneModel && begin+224<=scene.size() && std::strncmp(reinterpret_cast<const char*>(scene.data()+begin+200),part,16)==0;
+        if(std::strncmp(reinterpret_cast<const char*>(scene.data()+entry),part,16) && !extra)continue;
+        if(extra){size_t offset=U32(scene,begin+216);size=U32(scene,begin+220);begin+=offset;}
         if (begin + size > scene.size()) {
             return {};
         }
@@ -253,9 +260,17 @@ std::vector<Source> ReadTree(const char *town, const char *part, const char *fil
         data.assign(first, scene.begin() + begin + size);
         break;
     }
-    if (data.size() < 16) {
-        return {};
+    if(data.empty() && sceneModel) {
+        std::ifstream pack(PathsDataRoot()/"gedit"/town/"mds.pak",std::ios::binary);
+        std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(pack)),{});
+        for(size_t at=0;at+80<=bytes.size() && bytes[at];){
+            size_t start=at+U32(bytes,at+64),size=U32(bytes,at+68),next=U32(bytes,at+72);
+            if(start+size>bytes.size() || next<80)break;
+            if(std::strncmp(reinterpret_cast<const char*>(bytes.data()+at),part,64)==0){data.assign(bytes.begin()+start,bytes.begin()+start+size);break;}
+            at+=next;
+        }
     }
+    if (data.size() < 16) { return {}; }
     auto count = U32(data, 8);
     if (16 + size_t(count) * sizeof(MDS_OBJECT) > data.size()) {
         return {};
@@ -285,7 +300,7 @@ std::vector<Source> ReadTree(const char *town, const char *part, const char *fil
             continue;
         }
         // Ground decals from the original Georama tree must not become floating square platforms.
-        if ((std::strcmp(part, "e01t02") == 0 && std::strstr(object.name, "nuki")) || std::strstr(object.name, "kage") || std::strstr(object.name, "jimen") || std::strstr(object.name, "cube37")) {
+        if (!sceneModel && ((std::strcmp(part, "e01t02") == 0 && std::strstr(object.name, "nuki")) || std::strstr(object.name, "kage") || std::strstr(object.name, "jimen") || std::strstr(object.name, "cube37"))) {
             continue;
         }
         std::string texture;
@@ -320,6 +335,9 @@ std::vector<Source> ReadTree(const char *town, const char *part, const char *fil
                 texture.assign(m.texture, strnlen(m.texture, 44));
             }
             Source source;
+            source.object=object.name;
+            source.path="/"+std::string(object.name)+"/";
+            for(int parent=object.parent;parent>=0&&unsigned(parent)<i;){MDS_OBJECT ancestor;std::memcpy(&ancestor,data.data()+16+parent*sizeof(ancestor),sizeof(ancestor));source.path+=std::string(ancestor.name)+"/";parent=ancestor.parent;}
             source.texture = std::string(town) + "/" + texture;
             for (unsigned k = 0; k < n; k++, cursor += stride) {
                 float p[4], normal[4], uv[4];
@@ -337,6 +355,8 @@ std::vector<Source> ReadTree(const char *town, const char *part, const char *fil
                 vertex.uv[0] = uv[0];
                 vertex.uv[1] = uv[1];
                 std::fill_n(vertex.color, 4, 128);
+                if(h.colour_ofs>0){float color[4];if(vec(h.colour_ofs,U32(data,cursor+12),color))for(int a=0;a<4;++a)vertex.color[a]=uint8_t(std::clamp(color[a]*128.f+.5f,0.f,255.f));}
+
                 source.vertices.push_back(vertex);
             }
             if (prim == 4) {
@@ -388,6 +408,8 @@ gfx::TextureBinding Binding(const std::string &name) {
 }
 
 bool Occupied(double x, double z) {
+    if(foresttown::Occupied(x,z))return true;
+    if(foresttown::Forest(x,z)>.1 && authoredwater::Carve(x,z,foresttown::Elevation)<foresttown::Elevation-5)return true;
     for (auto &p : terrain::Foundations()) {
         if (std::abs(x - p.x) < p.halfX + 90 && std::abs(z - p.z) < p.halfZ + 90) {
             return true;
@@ -463,7 +485,7 @@ std::shared_ptr<const std::vector<forest::Tree>> TreePopulation(const terrain::T
     std::vector<double> edits;
     double x=tile.left(),z=tile.top(),size=tile.size();
     for(auto &p:terrain::Foundations())if(p.x+p.halfX+464>=x&&p.x-p.halfX-464<=x+size&&p.z+p.halfZ+464>=z&&p.z-p.halfZ-464<=z+size)
-        edits.insert(edits.end(),{0,p.x,p.z,p.halfX,p.halfZ,p.height});
+        edits.insert(edits.end(),{0,p.x,p.z,p.halfX,p.halfZ,p.height,p.blendRadius,double(p.water)});
     for(auto &r:terrain::Roads())if(std::max(r.x,r.endX)+264>=x&&std::min(r.x,r.endX)-264<=x+size&&std::max(r.z,r.endZ)+264>=z&&std::min(r.z,r.endZ)-264<=z+size)
         edits.insert(edits.end(),{1,r.x,r.z,r.endX,r.endZ,r.height,r.endHeight});
     gfx::capture::Scope populationProfile("world.population.total");
@@ -498,7 +520,9 @@ std::shared_ptr<const std::vector<forest::Tree>> TreePopulation(const terrain::T
 gfx::TextureBinding BiomeSurfaceBinding(const char *name) { return Binding(name); }
 
 void BiomePrepare(CEditGround *ground) {
-    if (textures.empty()) {
+    static bool initialized=false;
+    if (!initialized) {
+        initialized=true;
         populationCacheRoot=PathsSaveRoot()/"terrain-cache";
         if(const char *root=std::getenv("DC_TERRAIN_CACHE_ROOT"))populationCacheRoot=root;
         forest::TrimPopulationCache(populationCacheRoot);
@@ -539,6 +563,7 @@ void BiomePrepare(CEditGround *ground) {
                 std::fprintf(stderr, "forest model: species %d lod %d triangles %zu\n", species, lod, triangles);
             }
         }
+        requiredTextures["e02/e01b20"]=true;
         requiredTextures["e01/e01b06"]=true;
         requiredTextures["e01/e01b05"]=true;
         for(int lod=0;lod<3;++lod)for(int species=0;species<7;++species)for(const auto &src:treeLods[lod][species]){
@@ -665,7 +690,8 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
         double gx=(x-t.left())*surfaceGrid/t.size(),gz=(z-t.top())*surfaceGrid/t.size();
         int ix=std::clamp(int(gx),0,surfaceGrid-1),iz=std::clamp(int(gz),0,surfaceGrid-1);
         auto h=[&](int dx,int dz){return vertices[(iz+dz)*(surfaceGrid+1)+ix+dx].position[1];};
-        return grass::TriangleHeight(h(0,0),h(1,0),h(0,1),h(1,1),gx-ix,gz-iz);
+        double y=grass::TriangleHeight(h(0,0),h(1,0),h(0,1),h(1,1),gx-ix,gz-iz);
+        return authoredwater::Current()?authoredwater::Current()->Support(x,z,y):y;
     };
     result.tileSize=float(t.size());
     result.lowY=1e20f;result.highY=-1e20f;
@@ -673,8 +699,9 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
         result.lowY=std::min(result.lowY,v.position[1]-1000);
         result.highY=std::max(result.highY,v.position[1]+1000);
     }
-    result.waterU = float(std::fmod(t.left(), 350) / 350);
-    result.waterV = float(std::fmod(t.top(), 350) / 350);
+    result.waterPhase=float(std::fmod(t.left()*.062831853+t.top()*.041,6.283185307179586));
+    result.waterU = float(std::fmod(t.left(), 100) / 100);
+    result.waterV = float(std::fmod(t.top(), 100) / 100);
     const char                               *names[] = {"e02/e02b02", "e04/e04b01", "e03/e03b03"};
     std::array<std::vector<gfx::Vertex3D>, 3> layers;
     bool                                      used[3]{};
@@ -704,6 +731,11 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
         double grassCover=(1-terrain::Smooth(.12,.55,climate.sand))*(1-climate.snow)*climate.land;
         grassCover*=std::clamp(.65+climate.forest*.7,0.,1.);
         double weights[] = {grassCover * fade * soil, climate.sand * fade * soil, bank * soil};
+        // Inside the authored clearing the original grass is the base surface.
+        // Natural drainage must not paint pale procedural beaches into empty Georama cells.
+        double clearing=foresttown::Clearing(x,z);
+        if(clearing>0){auto stream=foresttown::Stream(x,z);double bankMask=(1-terrain::Smooth(stream.width+12,stream.width+65,stream.distance));
+            weights[0]=std::lerp(weights[0],1.,clearing);weights[1]*=1-clearing;weights[2]=std::lerp(weights[2],bankMask*.35,clearing);}
         double nativeGround=terrain::CanyonLandform(x,z).weight;
         for(auto &weight:weights)weight*=1-nativeGround;
         for (int i = 0; i < 3; i++) {
@@ -753,6 +785,7 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
                 double count=1;
                 for(int k=0;k<3;++k) for(int species=0;species<4;++species)
                     color[k]+=speciesWeights[species]*(species==2?.5*(speciesCanopyColors[2][k]+speciesCanopyColors[5][k]):speciesCanopyColors[species][k]);
+                if(foresttown::Occupied(x,z))density=0;
                 double coverage = (1 - std::exp(-density * std::lerp(3.5,.22,c.sand))) * terrain::Smooth(2200, 3500, std::hypot(x, z));
                 size_t pixel = (iz * size + ix) * 4;
                 for (int k = 0; k < 3; k++) {
@@ -823,7 +856,9 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
             auto r=terrain::RiverAt(wx,wz);
             double ocean=terrain::SeaLevel-p.ground;
             double channel=std::min({r.width-r.distance,r.water-p.ground,std::hypot(wx,wz)-3300});
-            p.v.position[1]=float(ocean>channel?terrain::SeaLevel:r.water+.2);
+            // A refined edge must stay on its parent surface plane. Resampling
+            // the height here creates T-junction cracks against an unrefined neighbour.
+
             p.mask=std::max(ocean,channel);p.proximity=std::max(ocean,r.width-r.distance);
             return p;
         };
@@ -852,13 +887,18 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
                 }
             }
             for(size_t k=1;k+1<polygon.size();++k)for(auto p:{polygon[0],polygon[k],polygon[k+1]}) {
+                double wx=t.left()+p.v.position[0],wz=t.top()+p.v.position[2];
+                auto flow=t.level<=3?terrain::RiverAt(wx,wz):terrain::RiverSample{};
+                p.v.uv[0]=float((std::fmod(t.left(),100)+p.v.position[0])/100);
+                p.v.uv[1]=float((std::fmod(t.top(),100)+p.v.position[2])/100);
+                if(t.level<=3)result.waterFlow.push_back({float(flow.flowX),float(flow.flowZ)});
                 inds.push_back(unsigned(verts.size()));verts.push_back(p.v);
             }
         };
         for(size_t i=0;i<waterIndices.size();i+=3)
             emitWater(emitWater,water[waterIndices[i]],water[waterIndices[i+1]],water[waterIndices[i+2]],0);
         if (!inds.empty()) {
-            result.water = PrepareMesh(std::move(verts), inds, "e03/e03b07");
+            result.water = PrepareMesh(std::move(verts), inds, "e02/e01b20");
         }
     }
     if (t.level == 0 && !undergrowth[0].empty()) {
@@ -883,7 +923,7 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
             double x=(ix+.12+.76*double(seed&65535)/65535)*spacing;
             double z=(iz+.12+.76*double((seed>>16)&65535)/65535)*spacing;
             if(x<t.left()||x>=t.left()+t.size()||z<t.top()||z>=t.top()+t.size()||std::hypot(x,z)<2200||Occupied(x,z))continue;
-            if(canyon::FloraMask(x,z)==0)continue;
+            if(canyon::FloraMask(x,z)==0 && foresttown::Forest(x,z)==0)continue;
             // Ecology shares the ring's spatial sample grid, just like the
             // supporting surface. Do not regenerate drainage and weathering
             // for thousands of individual ten-unit grass candidates.
@@ -901,7 +941,9 @@ BiomeChunk BiomeBuild(const terrain::Tile &t, const std::vector<gfx::Vertex3D> &
             if(river.distance<river.width+8)continue;
             double slope=std::hypot(ground(x+2,z)-ground(x-2,z),ground(x,z+2)-ground(x,z-2))/4;
             if(slope>.85)continue;
-            int species=c.sand>.55?3:c.forest>.65?int((seed>>21)%2):1+int((seed>>21)%2);
+            // The tree canopy palette produces disconnected floating leaf discs at ground level.
+            // Use the retail rooted grass tufts for dense forest understory.
+            int species=c.sand>.55?3:c.forest>.65?1:1+int((seed>>21)%2);
             const auto &palette=undergrowth[species];if(palette.empty())continue;
             const auto &source=palette[terrain::Mix(seed)%palette.size()];
             double angle=double(seed>>48)/65535*6.28318530718,scale=.8+double((seed>>24)&255)/255*.6;
@@ -988,7 +1030,12 @@ bool BiomeUpload(BiomeChunk &chunk, std::chrono::steady_clock::time_point deadli
     for(auto &m:chunk.canopy)if(!upload(m))return false;
     for(auto &lod:chunk.forest)for(auto &m:lod)if(!upload(m))return false;
     for(auto &species:chunk.instances)for(auto &m:species)if(!upload(m))return false;
-    if(!upload(chunk.water))return false;
+    if(chunk.water.count && !chunk.water.mesh){
+        if(std::chrono::steady_clock::now()>=deadline)return false;
+        chunk.water.mesh=gfx::CreateMesh(chunk.water.vertices,chunk.water.indices);
+        std::vector<uint32_t>().swap(chunk.water.indices);
+        if(chunk.waterFlow.empty())std::vector<gfx::Vertex3D>().swap(chunk.water.vertices);
+    }
     if(!chunk.canopyImage.levels.empty()) {
         if(std::chrono::steady_clock::now()>=deadline)return false;
         gfx::capture::Scope textureUpload("world.upload.texture");
@@ -1028,6 +1075,9 @@ void BiomeDraw(const BiomeChunk &chunk, gfx::MeshConstants constants, gfx::DrawS
     if (pass == 0) {
         constants.flags |= gfx::kMeshWorldUv | gfx::kMeshTerrainTriplanar;
         for (auto &m : chunk.ground) {
+            // Keep the retail forest grass sharp and phase-aligned with native ground.
+            if(m.texture=="e02/e02b02")constants.flags &= ~gfx::kMeshTerrainTriplanar;
+            else constants.flags |= gfx::kMeshTerrainTriplanar;
             gfx::DrawMesh(m.mesh, 0, m.count, constants, Binding(m.texture), overlay, &transform);
         }
         return;
@@ -1109,12 +1159,65 @@ void BiomeDraw(const BiomeChunk &chunk, gfx::MeshConstants constants, gfx::DrawS
         return;
     }
     if (chunk.water.mesh) {
-        constants.flags = gfx::kMeshLit | gfx::kMeshAtmosphere | gfx::kMeshVertexColor | gfx::kMeshWorldUv;
-        constants.world_uv[0][0] = 1.f / 350;
-        constants.world_uv[0][3] = chunk.waterU + float(std::fmod(time * .006, 1.0));
-        constants.world_uv[1][0] = 0;
-        constants.world_uv[1][2] = 1.f / 350;
-        constants.world_uv[1][3] = chunk.waterV + float(std::fmod(time * .003, 1.0));
+        Draw3DIdentityScope identity(&chunk.water,1000);
+        // Positions never depend on the eye, frame-copy UVs, or animation time.
+        // Advect only texture coordinates using the drainage tangent at each vertex.
+        auto vertices=chunk.water.vertices;
+        double seconds=time/30.;
+        for(size_t i=0;i<vertices.size();++i){
+            auto &v=vertices[i];const auto &flow=chunk.waterFlow[i];
+            v.uv[0]-=float(seconds*flow[0]/100);
+            v.uv[1]-=float(seconds*flow[1]/100);
+            double phase=chunk.waterPhase+v.position[0]*.062831853+v.position[2]*.041;
+            v.uv[0]+=float(.006*std::sin(seconds*.7+phase));
+            v.uv[1]+=float(.006*std::cos(seconds*.53-phase));
+            double dx=constants.clip_plane[0][0]-v.position[0],dy=constants.clip_plane[0][1]-v.position[1],dz=constants.clip_plane[0][2]-v.position[2];
+            double facing=std::abs(dy)/std::max(1.,std::sqrt(dx*dx+dy*dy+dz*dz));
+            double fresnel=.04+.35*std::pow(1-facing,5);
+            v.color[0]=uint8_t(90+20*fresnel);v.color[1]=uint8_t(112+12*fresnel);v.color[2]=uint8_t(118+10*fresnel);
+            v.color[3]=uint8_t(124+4*fresnel);
+        }
+        if(!vertices.empty())gfx::UpdateMeshVertices(chunk.water.mesh,0,vertices);
+        constants.flags = gfx::kMeshLit | gfx::kMeshAtmosphere | gfx::kMeshVertexColor;
+        std::memset(constants.world_uv,0,sizeof(constants.world_uv));
+        if(vertices.empty()){
+            constants.flags|=gfx::kMeshWorldUv;
+            constants.world_uv[0][0]=constants.world_uv[1][2]=1.f/100;
+            constants.world_uv[0][3]=chunk.waterU+float(.006*std::sin(seconds*.7));
+            constants.world_uv[1][3]=chunk.waterV+float(.006*std::cos(seconds*.53));
+        }
         gfx::DrawMesh(chunk.water.mesh, 0, chunk.water.count, constants, Binding(chunk.water.texture), overlay, &transform);
     }
 }
+
+std::vector<BiomeMesh> BiomeReadScene(const char *town,const char *part) {
+    auto sources=ReadTree(town,part,nullptr,0,true);
+    std::ifstream file(PathsDataRoot()/"gedit"/town/"scene.scn",std::ios::binary);
+    std::vector<uint8_t> scene((std::istreambuf_iterator<char>(file)),{});
+    for(unsigned i=0;i<U32(scene,4);++i){size_t e=16+i*48;if(e+48>scene.size())break;
+        if(std::strncmp(reinterpret_cast<const char*>(scene.data()+e),part,16))continue;
+        size_t b=U32(scene,e+16);if(b+224>scene.size() || !U32(scene,b+220))break;
+        std::string extra(reinterpret_cast<const char*>(scene.data()+b+200),strnlen(reinterpret_cast<const char*>(scene.data()+b+200),16));
+        auto ripples=ReadTree(town,extra.c_str(),nullptr,0,true);
+        for(auto &s:ripples)sources.push_back(std::move(s));break;
+    }
+    std::vector<BiomeMesh> result;
+    for(auto &s:sources){
+        if(std::getenv("DC_FOREST_MATERIAL_AUDIT")){float low=1e9f,high=-1e9f;for(auto &v:s.vertices){low=std::min(low,v.position[1]);high=std::max(high,v.position[1]);}std::fprintf(stderr,"forest material %s %s %s y=%g..%g\n",part,s.object.c_str(),s.texture.c_str(),low,high);}
+
+        // Strip the retail arena walls and distant billboard trees; the world
+        // supplies continuous terrain and an actual forest beyond the village.
+        if(s.object=="cube4__f" || s.object=="extru2__a40ns" ||
+           s.object.find("by")!=std::string::npos || s.object=="effect__cfzappn" || s.object=="kiri__a01zt")continue;
+        if(std::getenv("DC_FOREST_MATERIAL_AUDIT") && s.texture=="e02/e02b02")for(size_t i=0;i+2<s.indices.size();i+=3){auto &a=s.vertices[s.indices[i]],&b=s.vertices[s.indices[i+1]],&c=s.vertices[s.indices[i+2]];
+            double area=std::abs((b.position[0]-a.position[0])*(c.position[2]-a.position[2])-(c.position[0]-a.position[0])*(b.position[2]-a.position[2]));
+            double uv=std::abs((b.uv[0]-a.uv[0])*(c.uv[1]-a.uv[1])-(c.uv[0]-a.uv[0])*(b.uv[1]-a.uv[1]));if(uv>.0001)std::fprintf(stderr,"forest grass period %g\n",std::sqrt(area/uv));}
+        if(s.texture=="e02/e02b12")s.texture="e02/e02b14";
+        if(s.texture=="e02/e02b13")s.texture="e02/e02b15";
+        if(s.object.find("kage")!=std::string::npos || s.object.find("__a01")!=std::string::npos || s.object.find("__A01")!=std::string::npos)for(auto &v:s.vertices)v.color[3]=uint8_t(v.color[3]*.28f);
+        s.texture="scene/"+s.texture;requiredTextures[s.texture]=true;
+        auto mesh=PrepareMesh(std::move(s.vertices),std::move(s.indices),s.texture);mesh.sceneObjects=s.path;result.push_back(std::move(mesh));
+    }
+    return result;
+}
+void BiomeLoadSceneTextures(const char *town) { LoadTextures(town,true); }

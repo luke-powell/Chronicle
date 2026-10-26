@@ -13,6 +13,8 @@ struct Tree {
 };
 
 inline bool Occupied(double x, double z) {
+    if(foresttown::Occupied(x,z))return true;
+    if(foresttown::Forest(x,z)>.1 && authoredwater::Carve(x,z,foresttown::Elevation)<foresttown::Elevation-5)return true;
     for (const auto &p : terrain::Foundations()) {
         if (std::abs(x - p.x) < p.halfX + 90 && std::abs(z - p.z) < p.halfZ + 90) {
             return true;
@@ -102,7 +104,7 @@ inline std::vector<Tree> GenerateCached(double left,double top,double size) {
         // Include the normal/surface sampling margin. Distant edits cannot
         // affect these trees and must not invalidate the population cache.
         for(auto &p:terrain::Foundations())if(p.x+p.halfX+464>=x&&p.x-p.halfX-464<=x+cell&&p.z+p.halfZ+464>=z&&p.z-p.halfZ-464<=z+cell)
-            edits.insert(edits.end(),{0,p.x,p.z,p.halfX,p.halfZ,p.height});
+            edits.insert(edits.end(),{0,p.x,p.z,p.halfX,p.halfZ,p.height,p.blendRadius,double(p.water)});
         for(auto &r:terrain::Roads())if(std::max(r.x,r.endX)+264>=x&&std::min(r.x,r.endX)-264<=x+cell&&std::max(r.z,r.endZ)+264>=z&&std::min(r.z,r.endZ)-264<=z+cell)
             edits.insert(edits.end(),{1,r.x,r.z,r.endX,r.endZ,r.height,r.endHeight});
         Key key{ix,iz,std::move(edits)};

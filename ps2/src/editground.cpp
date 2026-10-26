@@ -6,6 +6,7 @@
 #ifdef PORT
 #include "town_terrain.hpp"
 #include "world_georama.hpp"
+#include "forest_georama.hpp"
 #endif
 
 #include <cstdlib>
@@ -1176,6 +1177,9 @@ void CEditGround::DrawWaterSurface(CCamera *camera) {
 }
 
 void CEditGround::DrawWater(int pass) {
+#ifdef PORT
+    if(ForestGeoramaActive())return;
+#endif
     sceVu0FVECTOR position;
     sceVu0FVECTOR corner;
     CMapParts    *object = parts;
@@ -1244,6 +1248,9 @@ void CEditGround::DrawWater(int pass) {
 }
 
 void CEditGround::DrawRipple(int pass) {
+#ifdef PORT
+    if(ForestGeoramaActive())return;
+#endif
     sceVu0FVECTOR transform;
     sceVu0FVECTOR position;
     CMapParts    *object = parts;

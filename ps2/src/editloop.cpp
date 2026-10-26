@@ -3,6 +3,7 @@
 #endif
 #ifdef PORT
 #include "world_origin.hpp"
+#include "forest_georama.hpp"
 #include "dran_flight.hpp"
 #endif
 #ifdef PORT
@@ -452,8 +453,15 @@ void EditSave() {
     int map_no = MapNo;
 
     if (map_no < TOWN_COUNT && map_no >= 0) {
+#ifdef PORT
+        ForestGeoramaSave();
+        if(!ForestGeoramaActive()) {
+#endif
         pEditGround->Save(NowEditMap, SaveData);
         EditPartsInfo.Save(NowEditMap, SaveData);
+#ifdef PORT
+        }
+#endif
     }
 
     EDIT_MAP_INFO *info = EditMapInfo;

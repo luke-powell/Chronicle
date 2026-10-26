@@ -11,6 +11,7 @@ struct BiomeMesh {
     gfx::MeshHandle mesh = 0;
     unsigned        count = 0;
     std::string     texture;
+    std::string     sceneObjects;
     std::vector<gfx::Vertex3D> vertices;
     std::vector<uint32_t> indices;
     float           radius = 0;
@@ -28,7 +29,8 @@ struct BiomeChunk {
     gfx::TextureHandle     canopyTexture = 0;
     gfx::tim2::Image canopyImage;
     BiomeMesh              water;
-    float                  waterU = 0, waterV = 0;
+    std::vector<std::array<float,2>> waterFlow;
+    float                  waterU = 0, waterV = 0, waterPhase = 0;
 };
 
 void       BiomePrepare(CEditGround *ground);
@@ -38,3 +40,6 @@ bool       BiomeUpload(BiomeChunk &, std::chrono::steady_clock::time_point deadl
 void       BiomeDestroy(BiomeChunk &);
 void       BiomeDraw(const BiomeChunk &, gfx::MeshConstants, gfx::DrawState, const gfx::MeshTransform &, double time, int pass, int targetLevel = -1);
 struct RenderInfo;
+
+std::vector<BiomeMesh> BiomeReadScene(const char *town,const char *part);
+void BiomeLoadSceneTextures(const char *town);

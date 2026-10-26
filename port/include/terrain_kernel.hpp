@@ -10,6 +10,8 @@
 #include <vector>
 #include "shared_memo.hpp"
 #include "canyon_kernel.hpp"
+#include "forest_town_layout.hpp"
+#include "authored_water.hpp"
 
 // Pure, global-coordinate terrain. No renderer, saves, or game assets required.
 namespace terrain {
@@ -392,6 +394,10 @@ inline Climate BaseClimateAt(double x, double z, double height) {
     district.weight*=1-Smooth(1800,3500,height);
     c.soil=std::lerp(c.soil,district.soil,district.weight);
     c.moisture=std::lerp(c.moisture,.55+.16*district.soil-.18*district.wall,district.weight);
+    const double forestTown=foresttown::Forest(x,z);
+    c.moisture=std::lerp(c.moisture,.84,forestTown);
+    c.temperature=std::lerp(c.temperature,.52,forestTown);
+    c.seasonality=std::lerp(c.seasonality,.3,forestTown);
     c.aridity=Smooth(.10,.38,.46-c.moisture);
     return c;
 }
@@ -446,12 +452,12 @@ inline double VegetationDensity(double x, double z, const Climate &c, double foo
     double habitat=std::lerp(woodland+copses,dry,Smooth(.18,.65,c.sand));
     auto weathered=WeatheringAt(x,z);
     double exposed=std::max(weathered.bedrock,weathered.talus*.65);
-    return canyon::FloraMask(x,z)*c.land*(1-c.snow)*habitat*(1-.95*exposed);
+    return std::max(canyon::FloraMask(x,z)*habitat*(1-.95*exposed),.55*foresttown::Forest(x,z))*c.land*(1-c.snow);
 }
 inline double UnderstoryDensity(double x,double z,const Climate &c) {
     double patch=Smooth(-.05,.45,ClimateNoise(x/320+18,z/320-73));
     auto weathered=WeatheringAt(x,z);
-    return canyon::FloraMask(x,z)*c.land*(1-c.snow)*(1-Smooth(.12,.55,c.sand))*(.35+.45*c.forest)*(.25+.75*patch)*(1-std::max(weathered.bedrock,weathered.talus*.8));
+    return std::max(canyon::FloraMask(x,z),foresttown::Forest(x,z))*c.land*(1-c.snow)*(1-Smooth(.12,.55,c.sand))*(.35+.45*c.forest)*(.25+.75*patch)*(1-std::max(weathered.bedrock,weathered.talus*.8));
 }
 
 // Climate-independent upper envelope of VegetationDensity. Forest fraction,
@@ -467,7 +473,7 @@ inline double VegetationDensityBound(double x,double z){
     double copses=.035*Smooth(.2,.6,ClimateNoise(wx/2200+21,wz/2200+33));
     double dry=.005+.019*Smooth(-.1,.5,ClimateNoise(wx/2600-15,wz/2600+42));
     auto weathered=WeatheringAt(x,z);
-    return canyon::FloraMask(x,z)*std::max({woodland,copses,dry})*(1-.95*std::max(weathered.bedrock,weathered.talus*.65));
+    return std::max(canyon::FloraMask(x,z)*std::max({woodland,copses,dry})*(1-.95*std::max(weathered.bedrock,weathered.talus*.65)),.55*foresttown::Forest(x,z));
 }
 
 inline std::array<double, 4> SpeciesWeights(const Climate &c) {
@@ -1018,6 +1024,7 @@ struct RiverSample {
     double distance = 1e30, water = 0, width = 60;
     bool   lake = false;
     double riparian = 0;
+    double flowX=0,flowZ=0;
 };
 
 inline const std::vector<DrainKey> &RiverCandidates(int64_t cx, int64_t cz) {
@@ -1056,6 +1063,11 @@ inline const std::vector<DrainKey> &RiverCandidates(int64_t cx, int64_t cz) {
 }
 
 inline RiverSample RiverAt(double x, double z, double surface = -1e30) {
+    auto forestStream=foresttown::Stream(x,z);
+    // The native creek owns the upstream side of the shared cross-section.
+    forestStream.distance=std::max(forestStream.distance,forestStream.width+foresttown::Village.z+1600-z);
+    if(forestStream.distance<forestStream.width+220 && !foresttown::RiverConnected())return {};
+    if(forestStream.distance<forestStream.width+220)return {forestStream.distance,forestStream.water,forestStream.width,forestStream.lake,1-Smooth(forestStream.width,forestStream.width+150,forestStream.distance),forestStream.flowX,forestStream.flowZ};
     auto canyonSample=CanyonLandform(x,z);
     if(canyonSample.weight>=1){
         double wet=canyonSample.width>0?1-Smooth(canyonSample.width+10,canyonSample.width+100,canyonSample.channel):0;
@@ -1094,7 +1106,8 @@ inline RiverSample RiverAt(double x, double z, double surface = -1e30) {
                 result.riparian = std::max(result.riparian, wet);
             }
             if (distance - width < result.distance - result.width) {
-                result = {distance, water, width, reach.lake, result.riparian};
+                double speed=reach.lake?0:std::clamp(4.+160.*std::max(0.,a.height-b.height)/std::max(1.,std::sqrt(ll)),4.,22.);
+                result = {distance, water, width, reach.lake, result.riparian, ll?speed*vx/std::sqrt(ll):0,ll?speed*vz/std::sqrt(ll):0};
             }
         }
     }
@@ -1115,6 +1128,7 @@ inline Climate ClimateAt(double x, double z, double height, double footprint) {
 
 inline double NaturalHeightUncached(double x, double z, double spacing) {
     double base = LandHeight(x, z);
+    base=std::lerp(base,foresttown::Elevation+12*Noise(x/700,z/700),foresttown::Forest(x,z));
     double canyonWeight=CanyonLandform(x,z).weight;
     if(canyonWeight>=1)return base; // already carved once by its own drainage
     if (spacing >= 512 || base < SeaLevel-100) {
@@ -1150,6 +1164,9 @@ inline double NaturalHeight(double x, double z, double spacing = 32) {
 
 struct Foundation {
     double x, z, halfX, halfZ, height;
+    double blendRadius=400;
+    bool water=false;
+    bool operator==(const Foundation &) const = default;
 };
 
 inline std::vector<Foundation> &Foundations() {
@@ -1159,6 +1176,7 @@ inline std::vector<Foundation> &Foundations() {
 
 struct Road {
     double x, z, endX, endZ, height, endHeight;
+    bool operator==(const Road &) const = default;
 };
 
 inline std::vector<Road> &Roads() {
@@ -1173,19 +1191,20 @@ inline double Height(double x, double z, double spacing = 32) {
         // A building's footprint is a hard constraint. Nearby placements may
         // grade the surroundings, but must never lift or erode its foundation.
         if (d < .00001) {
-            return p.height;
+            return authoredwater::Carve(x,z,p.height,spacing);
         }
-        if (d >= 400) {
+        if (d >= p.blendRadius) {
             continue;
         }
-        double t = d / 400;
+        double t = d / p.blendRadius;
         t = t * t * (3 - 2 * t);
         double w = (1 - t) / (d * d);
         weighted += w * p.height;
         weights += w;
         influence = std::max(influence, 1 - t);
     }
-    double base = weights > 0 ? std::lerp(NaturalHeight(x, z, spacing), weighted / weights, influence) : NaturalHeight(x, z, spacing);
+    double natural=authoredwater::FitShell(x,z,foresttown::Grade(x,z,NaturalHeight(x,z,spacing)));
+    double base=weights>0?std::lerp(natural,weighted/weights,influence):natural;
     double roadSum = 0, roadWeight = 0, nearest = 1e30;
     for (const auto &r : Roads()) {
         double dx = r.endX - r.x, dz = r.endZ - r.z, length = dx * dx + dz * dz;
@@ -1204,7 +1223,10 @@ inline double Height(double x, double z, double spacing = 32) {
         t = t * t * (3 - 2 * t);
         base = std::lerp(roadSum / roadWeight, base, t);
     }
-    return base;
+    auto stream=foresttown::Stream(x,z);
+    double wet=1-Smooth(stream.width+24,stream.width+90,stream.distance);
+    base=std::lerp(base,std::min(base,stream.water-24),wet);
+    return authoredwater::Carve(x,z,base,spacing);
 }
 
 // Surface of the actual finest terrain triangles, also used by draped roads.

@@ -3,6 +3,8 @@
 #endif
 #include "world_origin.hpp"
 #include "world_georama.hpp"
+#include "forest_georama.hpp"
+#include "forest_town_layout.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -34,6 +36,8 @@ CMapParts             *WorldGeoramaDrawingRoad = nullptr;
 static unsigned        foundationRevision = 0;
 static constexpr int   MayorHouse = 22, MayorPlatform = 23;
 static constexpr float PlatformTop = 47.424f;
+static int forestPickedPlot=-1,forestPickedRotation=0;
+static world::Position forestPickedPosition;
 
 bool WorldGeoramaCustom(CEditGround *ground, int plot) { return TownTerrainEnabled(ground) && plot == MayorHouse; }
 
@@ -341,8 +345,8 @@ void Footprint(CMapParts &part, int rotation, double &hx, double &hz) {
 void Snap(CMapParts &part, int rotation, float &x, float &z) {
     double hx, hz;
     Footprint(part, rotation, hx, hz);
-    x = float(std::floor(x / 100) * 100 + std::fmod(hx, 100));
-    z = float(std::floor(z / 100) * 100 + std::fmod(hz, 100));
+    x = float(std::floor((x + .5f) / 100) * 100 + std::fmod(hx, 100));
+    z = float(std::floor((z + .5f) / 100) * 100 + std::fmod(hz, 100));
 }
 
 bool OnPlatform(CMapParts &support, float x, float z, double hx = 0, double hz = 0) {
@@ -363,12 +367,14 @@ float SupportHeight(CEditGround *ground, int plot, float x, float z, int rotatio
             }
         }
     }
+    if(ForestGeoramaActive() && foresttown::VillageDistance(world::X(x),world::Z(z))<50)return float(foresttown::Elevation);
     return float(world::Height(x, z));
 }
 
 // Use retail's connector selection on a temporary local grid. World objects remain
 // in the native save array; this grid never limits their global coordinates.
 void Connections(CEditGround *ground, float x, float z) {
+    if(ForestGeoramaActive())return;
     CEditArea local;
     local.SetMapInfo(0, 1);
     local.SetSize(16, 16, 100, 10);
@@ -404,18 +410,37 @@ bool Fits(CEditGround *ground, int plot, float x, float z, int rotation) {
     if (src.handle < 0 || !info || !info->obtained || info->placed >= info->stock) {
         return false;
     }
+    if(ForestGeoramaActive() && plot==forestPickedPlot && rotation==forestPickedRotation && std::abs(world::X(x)-forestPickedPosition.x)<1 && std::abs(world::Z(z)-forestPickedPosition.z)<1)return true;
     double hx, hz;
     Footprint(src, rotation, hx, hz);
     for (auto &p : ground->parts) {
         if (p.handle < 0) {
             continue;
         }
+        if(ForestGeoramaActive() && (p.parts_no==18 || p.parts_no==19))continue;
         if (plot != MayorPlatform && p.parts_no == MayorPlatform && OnPlatform(p, x, z, hx, hz)) {
+            continue;
+        }
+        if(ForestGeoramaActive() && (src.subtype==MAP_PARTS_SUBTYPE_BRIDGE || src.subtype==MAP_PARTS_SUBTYPE_ON_RIVER) && p.subtype==MAP_PARTS_SUBTYPE_RIVER && std::abs(p.pos[0]-x)<1 && std::abs(p.pos[2]-z)<1)continue;
+        if(ForestGeoramaActive()) {
+            auto candidate=src;candidate.SetRotY(rotation);
+            bool overlap=false;
+            for(int iz=0;iz<candidate.GetHeight();++iz)for(int ix=0;ix<candidate.GetWidth();++ix){
+                if(candidate.GetInfoData(ix,iz)<128)continue;
+                double cx=x+(ix-(candidate.GetWidth()-1)*.5)*100,cz=z+(iz-(candidate.GetHeight()-1)*.5)*100;
+                for(int jz=0;jz<p.GetHeight();++jz)for(int jx=0;jx<p.GetWidth();++jx){
+                    if(p.GetInfoData(jx,jz)<128)continue;
+                    double ox=p.pos[0]+(jx-(p.GetWidth()-1)*.5)*100,oz=p.pos[2]+(jz-(p.GetHeight()-1)*.5)*100;
+                    overlap|=std::abs(cx-ox)<99 && std::abs(cz-oz)<99;
+                }
+            }
+            if(overlap){if(std::getenv("DC_FOREST_GEORAMA_TEST"))std::fprintf(stderr,"forest cell overlap: %d with %d at %.2f %.2f vs %.2f %.2f\n",plot,p.parts_no,x,z,p.pos[0],p.pos[2]);return false;}
             continue;
         }
         double px, pz;
         Footprint(p, p.rot_y, px, pz);
-        if (std::abs(x - p.pos[0]) < hx + px - .1 && std::abs(z - p.pos[2]) < hz + pz - .1) {
+        if (std::abs(x - p.pos[0]) < hx + px - 1 && std::abs(z - p.pos[2]) < hz + pz - 1) {
+            if(std::getenv("DC_FOREST_GEORAMA_TEST"))std::fprintf(stderr,"forest placement overlap: plot %d at %.1f %.1f footprint %.0f %.0f other %d %.1f %.1f %.0f %.0f\n",plot,x,z,hx,hz,p.parts_no,p.pos[0],p.pos[2],px,pz);
             return false;
         }
     }
@@ -458,6 +483,10 @@ int WorldGeoramaPlace(CEditGround *ground, int plot, float x, float z, int rotat
     if (!WorldGeoramaLoading && !Fits(ground, plot, x, z, rotation)) {
         return -1;
     }
+    if(ForestGeoramaActive() && (src.subtype==MAP_PARTS_SUBTYPE_BRIDGE || src.subtype==MAP_PARTS_SUBTYPE_ON_RIVER)) {
+        int slot=WorldGeoramaFind(ground,x,z);
+        if(slot>=0 && ground->parts[slot].subtype==MAP_PARTS_SUBTYPE_RIVER){auto &p=ground->parts[slot];ground->parts_info->parts[p.parts_no].placed--;p.Initialize();p.handle=-1;}
+    }
     for (int i = 0; i < 128; i++) {
         auto &p = ground->parts[i];
         if (p.handle >= 0) {
@@ -487,6 +516,7 @@ int WorldGeoramaDelete(CEditGround *ground, int *plot, int *rotation, float x, f
     auto &p = ground->parts[i];
     *plot = p.parts_no;
     *rotation = p.rot_y;
+    if(ForestGeoramaActive()){forestPickedPlot=*plot;forestPickedRotation=*rotation;forestPickedPosition=world::PositionOf(p.pos);if(std::getenv("DC_FOREST_GEORAMA_TEST"))std::fprintf(stderr,"forest picked %d rot %d at %.2f %.2f\n",*plot,*rotation,forestPickedPosition.x,forestPickedPosition.z);}
     if (p.parts_no == MayorPlatform) {
         for (auto &other : ground->parts) {
             if (other.handle >= 0 && other.parts_no != MayorPlatform && OnPlatform(p, other.pos[0], other.pos[2])) {
@@ -530,6 +560,7 @@ void WorldGeoramaPreview(CEditGround *ground, int plot, float *position, float *
         ground->cursor.unit_size = 100;
         ground->cursor.Draw(model, src.GetWidth(), src.GetHeight());
     }
+    if(ForestGeoramaActive() && pass==1)ForestGeoramaPreview(plot,model[0],model[1],model[2],rotation);
     if (src.category_no == pass && src.frame[0]) {
         auto preview = src;
         preview.SetRotY(rotation);
@@ -623,14 +654,16 @@ bool WorldGeoramaFoundations(CEditGround *ground) {
         Footprint(p, p.rot_y, hx, hz);
         double y = ground->effect_parts_id == i && ground->effect_count > 0 ? ground->effect_target_alt : p.pos[1];
         auto global = world::PositionOf(p.pos);
-        next.push_back({global.x, global.z, hx, hz, y});
+        bool water=p.subtype==MAP_PARTS_SUBTYPE_RIVER || p.subtype==MAP_PARTS_SUBTYPE_BRIDGE ||
+                   p.subtype==MAP_PARTS_SUBTYPE_LAKE || p.subtype==MAP_PARTS_SUBTYPE_ON_RIVER;
+        next.push_back({global.x, global.z, hx, hz, water?y-30:y,water?64.:400.,water});
     }
     bool changed = next.size() != terrain::Foundations().size() || roadPositions != lastRoads;
     if (!changed) {
         for (size_t i = 0; i < next.size(); i++) {
             auto &a = next[i];
             auto &b = terrain::Foundations()[i];
-            changed |= a.x != b.x || a.z != b.z || a.halfX != b.halfX || a.halfZ != b.halfZ || a.height != b.height;
+            changed |= a.x != b.x || a.z != b.z || a.halfX != b.halfX || a.halfZ != b.halfZ || a.height != b.height || a.blendRadius != b.blendRadius || a.water != b.water;
         }
     }
     if (changed) {
@@ -645,6 +678,7 @@ bool WorldGeoramaFoundations(CEditGround *ground) {
             double sum = 0;
             int    hits = 0;
             for (auto &f : terrain::Foundations()) {
+                if(f.water)continue; // Roads meet the bank, never the submerged bed.
                 double d = std::hypot(std::max(0.0, std::abs(roadPositions[i].first - f.x) - f.halfX), std::max(0.0, std::abs(roadPositions[i].second - f.z) - f.halfZ));
                 if (d <= 55) {
                     sum += f.height;

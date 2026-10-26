@@ -1,4 +1,6 @@
 #include "world_origin.hpp"
+#include "forest_town.hpp"
+#include "forest_georama.hpp"
 #include "dran_flight.hpp"
 #include "town_terrain.hpp"
 #include "town_biomes.hpp"
@@ -40,7 +42,8 @@
 namespace {
 struct Chunk {
     double profileBuilt=0,profileReady=0;
-    std::array<float,(terrain::Resolution+1)*(terrain::Resolution+1)> surface{};
+    std::vector<float> surface;
+    int surfaceResolution=terrain::Resolution;
     gfx::MeshHandle    mesh = 0;
     gfx::MeshHandle    snow = 0;
     gfx::MeshHandle hill = 0;
@@ -241,12 +244,17 @@ std::array<int, 4> Edges(const terrain::Tile &t, const terrain::Selection &s) {
     return edges;
 }
 
+bool ForestDetail(const terrain::Tile &t) {
+    double x=t.left()+t.size()/2,z=t.top()+t.size()/2;
+    return t.level==0 && (foresttown::VillageDistance(x,z)<900 || foresttown::TreehouseDistance(x,z)<300 || std::hypot(x-foresttown::Treant.x,z-foresttown::Treant.z)<700);
+}
+
 Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
     gfx::capture::TileScope profileTile(t.x,t.z,t.level);
     gfx::capture::Scope jobProfile("world.build.total");
     gfx::capture::Scope terrainProfile("world.build.height_mesh");
     auto started=std::chrono::steady_clock::now();
-    const int n=terrain::MeshResolution(t.level);
+    const int n=ForestDetail(t)?64:terrain::MeshResolution(t.level);
     std::vector<gfx::Vertex3D> vertices;
     std::vector<uint32_t>      indices;
     std::vector<gfx::Vertex3D> snowVertices;
@@ -269,15 +277,29 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
             if (z == n && edges[3]>=0 && terrain::MeshSampleLevel(edges[3])>terrain::MeshSampleLevel(t.level)) {
                 h = terrain::EdgeHeight(wx, wz, terrain::MeshSampleLevel(edges[3]), true);
             }
+            // Match the ordinary grid only where a detailed forest tile meets
+            // an ordinary tile; adjacent detailed tiles retain their fine banks.
+            if(n>terrain::Resolution){
+                if(x==0 && edges[0]==0 && !ForestDetail({t.x-1,t.z,0}))h=terrain::EdgeHeight(wx,wz,0,false);
+                if(x==n && edges[1]==0 && !ForestDetail({t.x+1,t.z,0}))h=terrain::EdgeHeight(wx,wz,0,false);
+                if(z==0 && edges[2]==0 && !ForestDetail({t.x,t.z-1,0}))h=terrain::EdgeHeight(wx,wz,0,true);
+                if(z==n && edges[3]==0 && !ForestDetail({t.x,t.z+1,0}))h=terrain::EdgeHeight(wx,wz,0,true);
+            }
             // A coarse mesh cannot resolve centimetre-scale lighting detail.
             // Sample normals at its footprint to avoid striped distant faces.
             double normalStep=std::max(8.,step*.5),ny=normalStep*2;
             double        nx = terrain::Height(wx - normalStep, wz,step) - terrain::Height(wx + normalStep, wz,step);
             double        nz = terrain::Height(wx, wz - normalStep,step) - terrain::Height(wx, wz + normalStep,step);
+            // Hidden excavation beneath native bank meshes must not shade the
+            // level Georama floor as a rounded mound.
+            if(foresttown::Clearing(wx,wz)>.99 && h>=foresttown::Elevation-2.1 && h<=foresttown::Elevation+.1)nx=nz=0;
             double        length = std::sqrt(nx * nx + ny*ny + nz * nz);
             gfx::Vertex3D v{};
             v.position[0] = float(x * step);
-            v.position[1] = float(h) - 0.04f;
+            // Only the hidden procedural mesh needs clearance beneath native
+            // cliffs. Keep the terrain height used by plants and gameplay intact.
+            double rendered=authoredwater::Current()?authoredwater::Current()->ClearCliffs(wx,wz,h,step):h;
+            v.position[1] = float(rendered) - 0.04f;
             low = std::min(low, v.position[1]);
             high = std::max(high, v.position[1]);
             v.position[2] = float(z * step);
@@ -413,6 +435,7 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
     }
     indices.resize(kept);
     result.indexCount=unsigned(indices.size());
+    result.surfaceResolution=n;result.surface.resize(size_t(n+1)*(n+1));
     for(size_t i=0;i<result.surface.size();++i)result.surface[i]=vertices[i].position[1];
     bool hillUsed=false;
     for(auto v:vertices){
@@ -430,10 +453,10 @@ Chunk Build(const terrain::Tile &t, std::array<int, 4> edges) {
 std::future<Chunk> TerrainWorker::Submit(MeshKey key) {
     const double submitted=gfx::capture::Enabled()?gfx::capture::Now():0;
     auto job=std::make_shared<std::packaged_task<Chunk()>>(
-        [key,submitted,foundations=terrain::Foundations(),roads=terrain::Roads()] {
+        [key,submitted,foundations=terrain::Foundations(),roads=terrain::Roads(),water=authoredwater::Current(),connected=foresttown::RiverConnected()] {
             gfx::capture::TileScope profileTile(key.first.x,key.first.z,key.first.level);
             if(submitted)gfx::capture::Span("world.queue.worker_wait",submitted,gfx::capture::Now()-submitted,"wait");
-            terrain::Foundations()=foundations;terrain::Roads()=roads;
+            terrain::Foundations()=foundations;terrain::Roads()=roads;authoredwater::Current()=water;foresttown::RiverConnected()=connected;
             return Build(key.first,key.second);
         });
     auto result=job->get_future();
@@ -447,13 +470,16 @@ void InvalidateEdits() {
     struct Bounds {double x0,z0,x1,z1;};
     std::vector<Bounds> bounds;
     auto changes=[&](const auto &old,const auto &now,auto add) {
-        auto equal=[](const auto &a,const auto &b){return std::memcmp(&a,&b,sizeof(a))==0;};
+        auto equal=[](const auto &a,const auto &b){return a==b;};
         for(const auto &v:old)if(std::none_of(now.begin(),now.end(),[&](const auto &n){return equal(v,n);}))add(v);
         for(const auto &v:now)if(std::none_of(old.begin(),old.end(),[&](const auto &n){return equal(v,n);}))add(v);
     };
     changes(previousFoundations,terrain::Foundations(),[&](const auto &p){bounds.push_back({p.x-p.halfX-432,p.z-p.halfZ-432,p.x+p.halfX+432,p.z+p.halfZ+432});});
     changes(previousRoads,terrain::Roads(),[&](const auto &r){bounds.push_back({std::min(r.x,r.endX)-232,std::min(r.z,r.endZ)-232,std::max(r.x,r.endX)+232,std::max(r.z,r.endZ)+232});});
     previousFoundations=terrain::Foundations();previousRoads=terrain::Roads();
+    static unsigned forestRevision=~0u;
+    auto current=ForestGeoramaRevision();
+    if(current!=forestRevision){forestRevision=current;bounds.push_back({foresttown::Village.x-2500,foresttown::Village.z-2000,foresttown::Village.x+2500,foresttown::Village.z+3500});}
     if(bounds.empty())return;
     ++terrainRevision;
     unsigned dirty=0;
@@ -704,11 +730,12 @@ void Update(double x, double z, int minimumLevel) {
 }
 } // namespace
 
-bool TownTerrainEnabled(const CEditGround *ground) { return ground && ground->map_no == TOWN_NORUNE; }
+bool TownTerrainEnabled(const CEditGround *ground) { return ground && (ground->map_no == TOWN_NORUNE || (ground->map_no == TOWN_MATATAKI && ForestGeoramaActive())); }
 void TownTerrainShutdown(){
     // Function-static procedural caches are destroyed before global workers.
     // Join explicitly while those caches and the renderer are still alive.
     ClearChunks();for(auto &flight:flights){flight.worker.reset();flight.building={};}
+    ForestTownShutdown();
     gfx::capture::Flush();
 }
 
@@ -726,7 +753,7 @@ bool TownTerrainResidentHeight(double wx,double wz,float &height,int maxLevel) {
             double v=((c[2]-a[2])*(px-c[0])+(a[0]-c[0])*(pz-c[2]))/den;
             if(u>=-1e-6&&v>=-1e-6&&u+v<=1.000001){height=float(u*a[1]+v*b[1]+(1-u-v)*c[1]+.04);return true;}
         }
-        constexpr int n=terrain::Resolution;
+        const int n=chunk.surfaceResolution;
         double u=(wx-t.left())/t.size()*n,v=(wz-t.top())/t.size()*n;
         int ix=std::clamp(int(u),0,n-1),iz=std::clamp(int(v),0,n-1);u-=ix;v-=iz;
         const auto &h=it->second.chunk.surface;int a=iz*(n+1)+ix,b=a+1,c=a+n+1,d=c+1;
@@ -770,6 +797,7 @@ void TownTerrainDraw(CEditGround *ground) {
         ClearChunks();
         return;
     }
+    ForestTownPrepare();
     WorldGeoramaFoundations(ground);
     InvalidateEdits();
     WorldGeoramaTest(ground);
@@ -777,8 +805,10 @@ void TownTerrainDraw(CEditGround *ground) {
     // Prepare is idempotent; map loaders may reuse the same arena address.
     Prepare(ground);
     if(std::getenv("DC_TOWN_WALK_TRACE")&&Chara){static int tick=0;if(++tick%60==0)std::fprintf(stderr,"town walk: %.3f %.3f %.3f\n",world::X(Chara->pos[0]),Chara->pos[1],world::Z(Chara->pos[2]));}
+    if(std::getenv("DC_FOREST_ASSET_PREVIEW")){ForestTownDraw();return;}
     if(std::getenv("DC_TEST_SKIP_TERRAIN_DRAW"))return;
     BiomePrepare(ground);
+    ForestTownPrepare();
     static int testTicks = 0;
     ++testTicks;
     int spawnFrame=120;if(const char *frame=std::getenv("DC_TERRAIN_TEST_SPAWN_FRAME"))spawnFrame=std::atoi(frame);
@@ -903,6 +933,7 @@ void TownTerrainDraw(CEditGround *ground) {
     for (const auto &key : active) {
         const auto   &tile = key.first;
         const auto   &chunk = cache.at(key).chunk;
+        Draw3DIdentityScope identity(&chunk,1000);
         // Tiles fully covered by the authored town have no procedural faces.
         if(chunk.indexCount==0)continue;
         sceVu0FMATRIX model;
@@ -947,7 +978,7 @@ void TownTerrainDraw(CEditGround *ground) {
         float white[4] = {1, 1, 1, 1}, black[4] = {0, 0, 0, 0};
         Draw3DMaterial(constants, info, white, white, black);
         constants.flags |= gfx::kMeshWorldUv | gfx::kMeshTerrainTriplanar;
-        bool nativeStyle=terrain::CanyonLandform(tile.left()+tile.size()/2,tile.top()+tile.size()/2).weight>.5;
+        bool nativeStyle=terrain::CanyonLandform(tile.left()+tile.size()/2,tile.top()+tile.size()/2).weight>.5 && foresttown::Forest(tile.left()+tile.size()/2,tile.top()+tile.size()/2)<.1;
         double floorPeriod=nativeStyle?190:200;
         constants.world_uv[0][0] = float(1/floorPeriod);
         constants.world_uv[0][3] = float(std::fmod(tile.left()/floorPeriod,4096));
@@ -966,7 +997,7 @@ void TownTerrainDraw(CEditGround *ground) {
         overlay.alpha = {};
         overlay.depth_write = false;
         overlay.depth_test = gfx::DepthTest::GEqual;
-        auto wallTexture=terrain::CanyonLandform(tile.left()+tile.size()/2,tile.top()+tile.size()/2).weight>.5?canyonRockBinding:rockBinding;
+        auto wallTexture=nativeStyle?canyonRockBinding:rockBinding;
         gfx::DrawMesh(chunk.mesh, 0, chunk.indexCount, constants, wallTexture, overlay, &transform);
         if(chunk.hill){
             constants.world_uv[0][0]=constants.world_uv[1][2]=1.f/120;
@@ -1017,6 +1048,7 @@ void TownTerrainDraw(CEditGround *ground) {
     }
     // Forest geometry is submitted with its owning terrain chunk above.
     // Translucent rivers follow every opaque chunk, so a later bank cannot paint over water.
+    ForestTownDraw();
     for(const auto&draw:waterDraws)BiomeDraw(*draw.chunk,draw.constants,state,draw.transform,testTicks,2);
     if (std::getenv("DC_TERRAIN_PERF")) {
         std::fprintf(stderr, "terrain draw: %d of %zu chunks\n", drawn, active.size());
@@ -1030,7 +1062,7 @@ int TownTerrainPolys(CEditGround *ground, CCPoly *out, const CBoxVu0 &box, int c
     // Queries must use world-aligned triangles, even after origin rebasing.
     double step = 32;
     while ((box.max[0]-box.min[0])/step>16 || (box.max[2]-box.min[2])/step>16) step*=2;
-    int count = 0;
+    int count = ForestTownPolys(out,box,std::min(180,capacity));
     auto distance=[&](const CCPoly &q){double d=0;for(int k=0;k<3;k++){double c=(q.vertex[0][k]+q.vertex[1][k]+q.vertex[2][k])/3.;double v=c-(box.min[k]+box.max[k])*.5;d+=v*v;}return d;};
     auto nearer=[&](const CCPoly&a,const CCPoly&b){return distance(a)<distance(b);};
     bool heap=false;

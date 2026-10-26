@@ -52,7 +52,7 @@ struct Config : HostSettings {
 #endif
     float detail_distance = 0.0f;
     float shadow_distance = 0.0f;
-    int   anisotropy = 0;
+    int   anisotropy = 8;
     // Third-person vertical return after mouse input: 0 holds height, 1 is retail's rate.
     float             mouse_camera_return = 0.2f;
     ConfigGameOptions options;

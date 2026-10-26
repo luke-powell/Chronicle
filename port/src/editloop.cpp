@@ -2,6 +2,7 @@
 #include "town_mobs.hpp"
 #include "dran_flight.hpp"
 #include "world_origin.hpp"
+#include "forest_georama.hpp"
 #include "biome_music.hpp"
 #include "common.h"
 
@@ -236,6 +237,7 @@ PORT_OVERRIDE int EditLoop() {
         std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
         ~TickTimer(){if(std::getenv("DC_TERRAIN_PERF"))std::fprintf(stderr,"town tick: %.3f ms mode %d\n",std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(),int(GameMode));}
     } tickTimer;
+    ForestGeoramaTick();
     world::BeginTick();
     goto_return_menu = 0;
 
@@ -778,9 +780,9 @@ PORT_OVERRIDE int EditLoop() {
     // Values are world eye X/Z followed by a world look-at X/Y/Z.
     if (TownTerrainEnabled(pEditGround) && std::getenv("DC_WORLD_PREVIEW_SITE")) {
         if (const char *shot = std::getenv("DC_WORLD_PREVIEW_GROUND_CAMERA")) {
-            double x, z, tx, ty, tz;
-            if (std::sscanf(shot, "%lf,%lf,%lf,%lf,%lf", &x, &z, &tx, &ty, &tz) == 5) {
-                NowCamera->SetPos(nullptr, world::LocalX(x), float(terrain::SurfaceHeight(x,z)+16), world::LocalZ(z));
+            double x, z, tx, ty, tz, height=16;
+            if (std::sscanf(shot, "%lf,%lf,%lf,%lf,%lf,%lf", &x, &z, &tx, &ty, &tz, &height) >= 5) {
+                NowCamera->SetPos(nullptr, world::LocalX(x), float(terrain::SurfaceHeight(x,z)+height), world::LocalZ(z));
                 NowCamera->SetRef(world::LocalX(tx), float(ty), world::LocalZ(tz));
                 NowCamera->CCamera::Step(-1);
             }
@@ -858,6 +860,7 @@ PORT_OVERRIDE int EditLoop() {
 
         if (GameMode == ED_MODE_WALK) {
             move_count = 30;
+            ForestGeoramaEnter();
             GameMode = ED_MODE_GEORAMA;
             EditCamera.SetAngleSoon(MainCamera.GetAngle());
             MainCamera.GetPos(at);
@@ -901,7 +904,7 @@ PORT_OVERRIDE int EditLoop() {
                 int          requested_count = 0;
                 ED_GRD_DATA *ground_data = reinterpret_cast<ED_GRD_DATA *>(SaveData->GetGrdData(MapNo));
 
-                if (ground_data != nullptr && ground_data->complete_event_seen == 0) {
+                if (!ForestGeoramaActive() && ground_data != nullptr && ground_data->complete_event_seen == 0) {
                     for (int i = 0; i < 24; i++) {
                         if (EditPartsInfo.request[i] != 0) {
                             requested_count++;

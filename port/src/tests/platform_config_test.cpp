@@ -663,9 +663,10 @@ TEST(PlatformConfig, TextWipe) {
 }
 
 TEST(PlatformConfig, Anisotropy) {
-    ASSERT_TRUE(ConfigParse("").anisotropy == 0);
+    ASSERT_TRUE(ConfigParse(R"({"video": {"anisotropy": 0}})").anisotropy == 0);
+    ASSERT_TRUE(ConfigParse("").anisotropy == 8);
     ASSERT_TRUE(ConfigParse(R"({"video": {"anisotropy": 16}})").anisotropy == 16);
-    ASSERT_TRUE(ConfigParse(R"({"video": {"anisotropy": 3}})").anisotropy == 0);
+    ASSERT_TRUE(ConfigParse(R"({"video": {"anisotropy": 3}})").anisotropy == 8);
     ASSERT_TRUE(ConfigParse(ConfigSerialize(ConfigParse(R"({"video": {"anisotropy": 8}})"))).anisotropy == 8);
 }
 
